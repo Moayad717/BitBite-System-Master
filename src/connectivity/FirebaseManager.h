@@ -10,7 +10,15 @@
 
 class FirebaseManager {
 public:
+    // Callback types for dependency injection (avoids extern references)
+    typedef bool (*WiFiCheckCallback)();
+    typedef void (*StreamInactiveCallback)();
+
     FirebaseManager();
+
+    // Set callbacks (call before begin)
+    void setWiFiCheckCallback(WiFiCheckCallback callback);
+    void setStreamInactiveCallback(StreamInactiveCallback callback);
 
     // Initialize Firebase
     bool begin(const char* apiKey, const char* databaseUrl);
@@ -63,6 +71,10 @@ private:
     bool authenticated_;
     unsigned long lastReconnectAttempt_;
     String lastError_;
+
+    // Callbacks
+    WiFiCheckCallback wifiCheckCallback_;
+    StreamInactiveCallback streamInactiveCallback_;
 
     // Connection helpers
     bool checkInternetConnection();

@@ -82,7 +82,9 @@ void setup() {
         LOG_WARN("SPIFFS init failed - offline storage disabled");
     }
 
-    // Initialize Serial2 for Feeding ESP communication
+    // Initialize Serial2 for Feeding ESP communication (increased buffers for large JSON)
+    Serial2.setTxBufferSize(2048);
+    Serial2.setRxBufferSize(512);
     Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
     LOG_INFO("Serial2 initialized for Feeding ESP (RX: %d, TX: %d)", RXD2, TXD2);
 
@@ -128,6 +130,12 @@ void setup() {
 
     // Initialize Firebase (only if WiFi connected)
     MemoryMonitor::checkpoint("Before FirebaseManager");
+    firebaseManager.setWiFiCheckCallback([]() -> bool {
+        return wifiManager.isConnected();
+    });
+    firebaseManager.setStreamInactiveCallback([]() {
+        streamManager.markInactive();
+    });
     if (wifiManager.isConnected()) {
         if (!firebaseManager.begin(API_KEY, DATABASE_URL)) {
             LOG_WARN("Firebase initialization failed - continuing offline");
