@@ -70,6 +70,7 @@ private:
     bool initialized_;
     bool authenticated_;
     unsigned long lastReconnectAttempt_;
+    uint8_t reconnectFailures_;   // Consecutive reinit failures (drives backoff)
     String lastError_;
 
     // Callbacks

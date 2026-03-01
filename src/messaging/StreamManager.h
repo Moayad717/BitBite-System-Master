@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Firebase_ESP_Client.h>
+#include <freertos/queue.h>
 // Forward declarations
 class FirebaseManager;
 class DeviceManager;
@@ -50,6 +51,16 @@ private:
     char deleteQueue_[DELETE_QUEUE_SIZE][120];
     int deleteQueueCount_;
 
+    // Pending command queue — commands are received in the Firebase stream task
+    // (Core 1) but must be dispatched from networkTask (Core 0) to avoid calling
+    // blocking Firebase operations from inside the stream callback.
+    struct PendingCommand {
+        char type[32];
+        char id[64];
+    };
+    static const int PENDING_CMD_QUEUE_SIZE = 5;
+    QueueHandle_t pendingCmdQueue_;
+
     // Stream callbacks (static for Firebase library)
     static void streamCallbackWrapper(FirebaseStream data);
     static void streamTimeoutCallbackWrapper(bool timeout);
@@ -65,4 +76,5 @@ private:
     void queueCommandDeletion(const char* commandId);
     void processDeleteQueue();
     bool isCommandInDeleteQueue(const char* commandId) const;
+    void dispatchPendingCommands();
 };

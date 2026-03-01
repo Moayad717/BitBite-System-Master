@@ -19,7 +19,8 @@ StreamManager::StreamManager()
       streamStarted_(false),
       lastDeleteTime_(0),
       lastRestartAttempt_(0),
-      deleteQueueCount_(0) {
+      deleteQueueCount_(0),
+      pendingCmdQueue_(nullptr) {
 
     instance_ = this;
 }
@@ -31,6 +32,11 @@ StreamManager::StreamManager()
 void StreamManager::begin(FirebaseManager* fbManager, DeviceManager* devManager) {
     firebaseManager_ = fbManager;
     deviceManager_ = devManager;
+
+    pendingCmdQueue_ = xQueueCreate(PENDING_CMD_QUEUE_SIZE, sizeof(PendingCommand));
+    if (!pendingCmdQueue_) {
+        LOG_ERROR("Failed to create pending command queue!");
+    }
 
     LOG_INFO("StreamManager initialized");
 }
@@ -77,17 +83,20 @@ bool StreamManager::restartStream() {
     LOG_INFO("Restarting command stream...");
 
     stopStream();
-    delay(1000);  // Give time for cleanup
+    delay(2000);  // Give SSL teardown time to complete
 
     return startStream();
 }
 
 void StreamManager::stopStream() {
-    if (streamActive_) {
-        firebaseManager_->endStream();
-        streamActive_ = false;
-        LOG_INFO("Command stream stopped");
-    }
+    // Always end the stream regardless of streamActive_ state.
+    // If a timeout cleared streamActive_ before we get here, the underlying
+    // streamFbdo_ SSL connection is still open.  Calling endStream()+clear()
+    // unconditionally is the only way to free those buffers and prevent the
+    // "Incoming protocol or record version unsupported" SSL error on restart.
+    firebaseManager_->endStream();
+    streamActive_ = false;
+    LOG_INFO("Command stream stopped");
 }
 
 bool StreamManager::isActive() const {
@@ -104,17 +113,32 @@ void StreamManager::markInactive() {
 // ============================================================================
 
 void StreamManager::tick() {
+    // Dispatch commands received in stream callback — must run here (networkTask
+    // context, Core 0) so that blocking Firebase calls like getString() work.
+    dispatchPendingCommands();
+
     // Auto-restart stream if it was started before but is now inactive
     if (streamStarted_ && !streamActive_ && firebaseManager_->isReady()) {
         unsigned long now = millis();
         if (now - lastRestartAttempt_ >= STREAM_RESTART_INTERVAL) {
             lastRestartAttempt_ = now;
             LOG_WARN("Stream inactive - attempting auto-restart...");
-            startStream();
+            restartStream();  // Must go through stopStream() to clear stale SSL state
         }
     }
 
     processDeleteQueue();
+}
+
+void StreamManager::dispatchPendingCommands() {
+    if (!pendingCmdQueue_ || !commandCallback_) {
+        return;
+    }
+
+    PendingCommand cmd;
+    while (xQueueReceive(pendingCmdQueue_, &cmd, 0) == pdTRUE) {
+        commandCallback_(String(cmd.type), String(cmd.id));
+    }
 }
 
 // ============================================================================
@@ -186,9 +210,17 @@ void StreamManager::processSingleCommand(FirebaseJson& json, const String& comma
         String commandType = typeData.stringValue;
         LOG_INFO("Received command: %s (ID: %s)", commandType.c_str(), commandId.c_str());
 
-        // Execute callback
-        if (commandCallback_) {
-            commandCallback_(commandType, commandId);
+        // Push to pending queue — the callback is dispatched from tick() (networkTask
+        // context) to avoid calling blocking Firebase ops inside the stream callback.
+        if (pendingCmdQueue_) {
+            PendingCommand cmd;
+            strncpy(cmd.type, commandType.c_str(), sizeof(cmd.type) - 1);
+            cmd.type[sizeof(cmd.type) - 1] = '\0';
+            strncpy(cmd.id, commandId.c_str(), sizeof(cmd.id) - 1);
+            cmd.id[sizeof(cmd.id) - 1] = '\0';
+            if (xQueueSend(pendingCmdQueue_, &cmd, 0) != pdTRUE) {
+                LOG_WARN("Pending command queue full, dropping: %s", commandType.c_str());
+            }
         }
 
         // Queue deletion
@@ -230,9 +262,16 @@ void StreamManager::processMultipleCommands(FirebaseJson& json) {
             String commandType = typeData.stringValue;
             LOG_INFO("  [%d/%d] Command: %s (ID: %s)", i+1, count, commandType.c_str(), commandId.c_str());
 
-            // Execute callback
-            if (commandCallback_) {
-                commandCallback_(commandType, commandId);
+            // Push to pending queue (dispatched from tick(), not from callback context)
+            if (pendingCmdQueue_) {
+                PendingCommand cmd;
+                strncpy(cmd.type, commandType.c_str(), sizeof(cmd.type) - 1);
+                cmd.type[sizeof(cmd.type) - 1] = '\0';
+                strncpy(cmd.id, commandId.c_str(), sizeof(cmd.id) - 1);
+                cmd.id[sizeof(cmd.id) - 1] = '\0';
+                if (xQueueSend(pendingCmdQueue_, &cmd, 0) != pdTRUE) {
+                    LOG_WARN("  Pending command queue full, dropping: %s", commandType.c_str());
+                }
             }
 
             // Queue deletion

@@ -12,6 +12,7 @@ FirebaseManager::FirebaseManager()
     : initialized_(false),
       authenticated_(false),
       lastReconnectAttempt_(0),
+      reconnectFailures_(0),
       wifiCheckCallback_(nullptr),
       streamInactiveCallback_(nullptr) {
 }
@@ -31,33 +32,18 @@ void FirebaseManager::setStreamInactiveCallback(StreamInactiveCallback callback)
 bool FirebaseManager::begin(const char* apiKey, const char* databaseUrl) {
     LOG_INFO("Initializing Firebase...");
 
-    if (!checkInternetConnection()) {
-        LOG_ERROR("No internet connection - Firebase initialization failed");
-        return false;
-    }
-
     // Configure Firebase
     config_.api_key = apiKey;
     config_.database_url = databaseUrl;
+    config_.token_status_callback = tokenStatusCallback;
     config_.timeout.serverResponse = 10000;
     config_.timeout.socketConnection = 10000;
 
     // Anonymous sign-up (required by Firebase library for API key auth)
-    LOG_INFO("Signing up as anonymous user...");
-    if (Firebase.signUp(&config_, &auth_, "", "")) {
-        LOG_INFO("Anonymous sign-up successful");
-    } else {
-        LOG_ERROR("Anonymous sign-up failed: %s", config_.signer.signupError.message.c_str());
-        lastError_ = config_.signer.signupError.message.c_str();
-        return false;
-    }
-
-    // Set token callback after sign-up
-    config_.token_status_callback = tokenStatusCallback;
+    Firebase.signUp(&config_, &auth_, "", "");
 
     // Begin Firebase
     Firebase.begin(&config_, &auth_);
-    Firebase.reconnectWiFi(true);
 
     // Configure buffer sizes
     fbdo_.setResponseSize(FIREBASE_RESPONSE_SIZE);
@@ -65,6 +51,8 @@ bool FirebaseManager::begin(const char* apiKey, const char* databaseUrl) {
 
     cmdFbdo_.setResponseSize(FIREBASE_RESPONSE_SIZE);
     cmdFbdo_.setBSSLBufferSize(FIREBASE_SSL_BUFFER_SIZE, FIREBASE_SSL_RECEIVE_BUFFER);
+
+    Firebase.reconnectWiFi(true);
 
     LOG_INFO("Waiting for Firebase authentication...");
     unsigned long authStart = millis();
@@ -88,48 +76,57 @@ bool FirebaseManager::begin(const char* apiKey, const char* databaseUrl) {
 }
 
 bool FirebaseManager::reinitialize() {
-    LOG_INFO("Reinitializing Firebase...");
-
-    if (!checkInternetConnection()) {
-        LOG_ERROR("No internet connection");
-        return false;
-    }
+    LOG_INFO("Reinitializing Firebase... (attempt #%u)", reconnectFailures_ + 1);
 
     // Notify StreamManager that stream state is about to be cleared
     if (streamInactiveCallback_) {
         streamInactiveCallback_();
     }
 
-    // Clear all instances
-    fbdo_.clear();
+    // Step 1: Stop the persistent stream — closes the SSL/TCP session and
+    // sets the internal stream_stop flag so the callback task exits cleanly.
+    Firebase.RTDB.endStream(&streamFbdo_);
+
+    // Step 2: Clear internal state of all FirebaseData objects
     streamFbdo_.clear();
+    fbdo_.clear();
     cmdFbdo_.clear();
 
-    // Reset Firebase
+    // Step 3: Reset auth token state. This wipes the cached token and forces
+    // the library to perform a fresh token exchange on the next begin().
+    // Without this, a stale/expired token is silently reused.
+    Firebase.reset(&config_);
+
+    // Step 4: Re-run anonymous sign-up, then begin.
+    // signUp must precede begin() — this is a library contract for anonymous auth.
+    Firebase.signUp(&config_, &auth_, "", "");
     Firebase.begin(&config_, &auth_);
 
-    // Reconfigure buffer sizes
+    // Step 5: Restore buffer sizes (cleared when objects were cleared)
     fbdo_.setResponseSize(FIREBASE_RESPONSE_SIZE);
     fbdo_.setBSSLBufferSize(FIREBASE_SSL_BUFFER_SIZE, FIREBASE_SSL_RECEIVE_BUFFER);
     cmdFbdo_.setResponseSize(FIREBASE_RESPONSE_SIZE);
     cmdFbdo_.setBSSLBufferSize(FIREBASE_SSL_BUFFER_SIZE, FIREBASE_SSL_RECEIVE_BUFFER);
 
-    // Wait for authentication (reduced from 20s to 5s to avoid blocking Core 0 too long)
+    // Step 6: Wait for authentication — 10 s gives the token exchange time to
+    // complete without blocking Core 0 for too long
     LOG_INFO("Waiting for Firebase authentication...");
     unsigned long start = millis();
 
-    while (!Firebase.ready() && millis() - start < 5000) {
+    while (!Firebase.ready() && millis() - start < 10000) {
         delay(250);
     }
 
     if (Firebase.ready()) {
         LOG_INFO("Firebase reinitialized successfully");
         authenticated_ = true;
+        reconnectFailures_ = 0;
         return true;
     }
 
-    LOG_ERROR("Firebase reinitialization failed");
-    LOG_ERROR("Error: %s", fbdo_.errorReason().c_str());
+    reconnectFailures_++;
+    LOG_ERROR("Firebase reinitialization failed (attempt #%u): %s",
+              reconnectFailures_, fbdo_.errorReason().c_str());
     lastError_ = fbdo_.errorReason();
     authenticated_ = false;
     return false;
@@ -148,6 +145,9 @@ void FirebaseManager::tick() {
 
     // Handle authentication state changes
     if (isReady != authenticated_) {
+        if (isReady && !authenticated_) {
+            reconnectFailures_ = 0;  // Reset backoff counter on successful reconnect
+        }
         handleAuthStateChange(authenticated_, isReady);
     }
 
@@ -155,9 +155,17 @@ void FirebaseManager::tick() {
     if (!isReady && wifiCheckCallback_ && wifiCheckCallback_()) {
         unsigned long now = millis();
 
-        if (now - lastReconnectAttempt_ >= FIREBASE_RECONNECT_INTERVAL) {
+        // Exponential backoff: FIREBASE_RECONNECT_INTERVAL * 2^failures, capped at 5 min.
+        // Prevents hammering Firebase on repeated failures.
+        unsigned long backoffMs = FIREBASE_RECONNECT_INTERVAL;
+        for (uint8_t i = 0; i < reconnectFailures_ && backoffMs < 300000UL; i++) {
+            backoffMs *= 2;
+        }
+        if (backoffMs > 300000UL) backoffMs = 300000UL;
+
+        if (now - lastReconnectAttempt_ >= backoffMs) {
             lastReconnectAttempt_ = now;
-            LOG_INFO("Attempting Firebase reconnection...");
+            LOG_INFO("Attempting Firebase reconnection (backoff: %lus)...", backoffMs / 1000);
             reinitialize();
         }
     }

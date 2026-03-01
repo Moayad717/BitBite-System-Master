@@ -33,6 +33,11 @@ bool enqueueFirebaseWrite(QueueItemType type, const char* jsonData) {
         return false;
     }
 
+    if (strlen(jsonData) >= sizeof(FirebaseQueueItem::jsonData)) {
+        LOG_WARN("Firebase queue item truncated (%d bytes > %d limit)",
+                 strlen(jsonData), sizeof(FirebaseQueueItem::jsonData) - 1);
+    }
+
     FirebaseQueueItem item;
     item.type = type;
     strncpy(item.jsonData, jsonData, sizeof(item.jsonData) - 1);
@@ -70,6 +75,20 @@ static void processFirebaseQueue() {
                 if (success) {
                     LOG_DEBUG("Queue: Status sent to Firebase");
                 }
+            } else if (item.type == QueueItemType::SYNC_STATUS) {
+                char path[128];
+                snprintf(path, sizeof(path), "%s/lastScheduleSync", deviceManager.getDevicePath());
+                success = firebaseManager.setJSON(path, &json);
+                if (success) {
+                    LOG_DEBUG("Queue: Schedule sync status sent to Firebase");
+                }
+            } else if (item.type == QueueItemType::SCHEDULE_STATUS) {
+                char path[128];
+                snprintf(path, sizeof(path), "%s/scheduleStatus", deviceManager.getDevicePath());
+                success = firebaseManager.setJSON(path, &json);
+                if (success) {
+                    LOG_INFO("Queue: Schedule status sent to Firebase");
+                }
             } else {
                 // LOG and FAULT use pushJSON to their respective paths
                 char path[128];
@@ -88,8 +107,8 @@ static void processFirebaseQueue() {
 
             if (!success) {
                 LOG_ERROR("Queue: Firebase write failed: %s", firebaseManager.getLastError().c_str());
-                // Queue to offline storage if available
-                if (item.type != QueueItemType::STATUS) {
+                // Only persist logs and faults to offline storage — not operational status items
+                if (item.type == QueueItemType::LOG || item.type == QueueItemType::FAULT) {
                     OfflineEntryType offlineType = (item.type == QueueItemType::LOG)
                         ? OfflineEntryType::LOG : OfflineEntryType::FAULT;
                     offlineQueue.enqueue(offlineType, item.jsonData);

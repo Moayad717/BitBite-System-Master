@@ -11,14 +11,16 @@
 // ============================================================================
 
 enum class QueueItemType : uint8_t {
-    STATUS,     // setJSON to device status path
-    LOG,        // pushJSON to device logs path
-    FAULT       // pushJSON to device faults path
+    STATUS,           // setJSON to device status path
+    LOG,              // pushJSON to device logs path
+    FAULT,            // pushJSON to device faults path
+    SYNC_STATUS,      // setJSON to {devicePath}/lastScheduleSync (Core 1 → Core 0)
+    SCHEDULE_STATUS   // setJSON to {devicePath}/scheduleStatus   (Core 1 → Core 0)
 };
 
 struct FirebaseQueueItem {
     QueueItemType type;
-    char jsonData[512];     // Pre-formatted JSON string
+    char jsonData[2048];    // Pre-formatted JSON string (2048 to fit schedule status payloads)
 };
 
 // ============================================================================

@@ -63,6 +63,11 @@ void SerialProtocol::sendTime() {
         return;
     }
 
+    if (!timeManager_->isSynced()) {
+        LOG_WARN("NTP not synced - skipping TIME send to Feeding ESP");
+        return;
+    }
+
     char timestamp[32];
     deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
 
@@ -219,23 +224,8 @@ void SerialProtocol::handleLogEntry(const String& logJson) {
     String sanitized = sanitizeJson(logJson);
     LOG_INFO("Log from Feeding ESP");
 
-    // Add timestamp to the data
-    char timestamp[25];
-    deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
-
-    // Build JSON with timestamp
-    String dataWithTimestamp = sanitized;
-    // Insert timestamp into JSON (before closing brace)
-    int lastBrace = dataWithTimestamp.lastIndexOf('}');
-    if (lastBrace >= 0) {
-        dataWithTimestamp = dataWithTimestamp.substring(0, lastBrace);
-        dataWithTimestamp += ",\"timestamp\":\"";
-        dataWithTimestamp += timestamp;
-        dataWithTimestamp += "\"}";
-    }
-
-    // Queue for Core 0 to send to Firebase (or offline storage if unavailable)
-    if (!enqueueFirebaseWrite(QueueItemType::LOG, dataWithTimestamp.c_str())) {
+    // Timestamp is already embedded by the feeder ESP — do not overwrite it.
+    if (!enqueueFirebaseWrite(QueueItemType::LOG, sanitized.c_str())) {
         LOG_WARN("Failed to queue log entry");
     }
 }
@@ -244,23 +234,8 @@ void SerialProtocol::handleFaultEntry(const String& faultJson) {
     String sanitized = sanitizeJson(faultJson);
     LOG_WARN("Fault from Feeding ESP");
 
-    // Add timestamp to the data
-    char timestamp[25];
-    deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
-
-    // Build JSON with timestamp
-    String dataWithTimestamp = sanitized;
-    // Insert timestamp into JSON (before closing brace)
-    int lastBrace = dataWithTimestamp.lastIndexOf('}');
-    if (lastBrace >= 0) {
-        dataWithTimestamp = dataWithTimestamp.substring(0, lastBrace);
-        dataWithTimestamp += ",\"timestamp\":\"";
-        dataWithTimestamp += timestamp;
-        dataWithTimestamp += "\"}";
-    }
-
-    // Queue for Core 0 to send to Firebase (or offline storage if unavailable)
-    if (!enqueueFirebaseWrite(QueueItemType::FAULT, dataWithTimestamp.c_str())) {
+    // Timestamp is already embedded by the feeder ESP — do not overwrite it.
+    if (!enqueueFirebaseWrite(QueueItemType::FAULT, sanitized.c_str())) {
         LOG_WARN("Failed to queue fault entry");
     }
 }
@@ -405,11 +380,6 @@ void SerialProtocol::handleScheduleStatusEnd() {
 }
 
 void SerialProtocol::sendScheduleStatusToFirebase() {
-    if (!firebaseManager_ || !firebaseManager_->isReady()) {
-        LOG_WARN("Firebase not ready - cannot send schedule status");
-        return;
-    }
-
     // Build combined JSON: { header info + "items": [...] }
     FirebaseJson json;
     json.setJsonData(scheduleStatusState_.headerJson);
@@ -422,21 +392,19 @@ void SerialProtocol::sendScheduleStatusToFirebase() {
     deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
     json.set("timestamp", timestamp);
 
-    char path[128];
-    snprintf(path, sizeof(path), "%s/scheduleStatus", deviceManager_->getDevicePath());
-
-    if (firebaseManager_->setJSON(path, &json)) {
-        LOG_INFO("Schedule status sent to Firebase");
-    } else {
-        LOG_ERROR("Failed to send schedule status: %s", firebaseManager_->getLastError().c_str());
-    }
-
+    String jsonStr;
+    json.toString(jsonStr);
     json.clear();
     itemsArray.clear();
 
-    // Free accumulated strings
+    // Free accumulated strings before enqueueing
     scheduleStatusState_.headerJson = "";
     scheduleStatusState_.itemsJson = "";
+
+    // Route through Core 0 queue — never call Firebase directly from Core 1
+    if (!enqueueFirebaseWrite(QueueItemType::SCHEDULE_STATUS, jsonStr.c_str())) {
+        LOG_WARN("Failed to queue schedule status");
+    }
 }
 
 // ============================================================================
@@ -444,10 +412,6 @@ void SerialProtocol::sendScheduleStatusToFirebase() {
 // ============================================================================
 
 void SerialProtocol::sendScheduleSyncStatus(bool success, const char* message) {
-    if (!firebaseManager_ || !firebaseManager_->isReady()) {
-        return;
-    }
-
     FirebaseJson json;
     json.set("success", success);
     json.set("message", message);
@@ -456,14 +420,14 @@ void SerialProtocol::sendScheduleSyncStatus(bool success, const char* message) {
     deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
     json.set("timestamp", timestamp);
 
-    char syncPath[128];
-    snprintf(syncPath, sizeof(syncPath), "%s/lastScheduleSync", deviceManager_->getDevicePath());
-
-    if (firebaseManager_->setJSON(syncPath, &json)) {
-        LOG_DEBUG("Schedule sync status sent");
-    }
-
+    String jsonStr;
+    json.toString(jsonStr);
     json.clear();
+
+    // Route through Core 0 queue — never call Firebase directly from Core 1
+    if (!enqueueFirebaseWrite(QueueItemType::SYNC_STATUS, jsonStr.c_str())) {
+        LOG_WARN("Failed to queue schedule sync status");
+    }
 }
 
 String SerialProtocol::sanitizeJson(const String& json) {
