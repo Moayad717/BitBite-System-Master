@@ -30,14 +30,17 @@ jobs:
         run: pip install platformio
 
       - name: Generate Credentials.h from GitHub Secrets
+        env:
+          FB_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FB_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
         run: |
           printf '#pragma once\n' > src/config/Credentials.h
-          printf '#define API_KEY "%s"\n' "${{ secrets.FIREBASE_API_KEY }}" >> src/config/Credentials.h
-          printf '#define DATABASE_URL "%s"\n' "${{ secrets.FIREBASE_DATABASE_URL }}" >> src/config/Credentials.h
+          printf '#define API_KEY "%s"\n' "$FB_API_KEY" >> src/config/Credentials.h
+          printf '#define DATABASE_URL "%s"\n' "$FB_DATABASE_URL" >> src/config/Credentials.h
           printf '#define OTA_WIFI_REPO "Moayad717/BitBite-System-Master"\n' >> src/config/Credentials.h
           printf '#define OTA_FEEDER_REPO "Moayad717/BitBite-System-Controller"\n' >> src/config/Credentials.h
           printf '#define OTA_GITHUB_TOKEN ""\n' >> src/config/Credentials.h
-          printf '#define OTA_CHECK_INTERVAL_MS (30UL * 60UL * 1000UL)\n' >> src/config/Credentials.h
+          printf '#define OTA_CHECK_INTERVAL_MS (60UL * 1000UL)\n' >> src/config/Credentials.h
           echo "Credentials.h generated:"
           cat src/config/Credentials.h
 
