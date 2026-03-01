@@ -1,0 +1,18 @@
+# Custom OTA partition table for ESP32 (4MB flash)
+# Supports dual OTA slots + SPIFFS for feeder firmware storage
+#
+# Layout:
+#   nvs      20KB  @ 0x9000  - Non-volatile storage (WiFi creds, OTA version)
+#   otadata   8KB  @ 0xe000  - OTA selection metadata
+#   app0    1.5MB  @ 0x10000 - OTA slot 0 (active)
+#   app1    1.5MB  @ 0x190000- OTA slot 1 (standby)
+#   spiffs  960KB  @ 0x310000- SPIFFS (offline queue + feeder firmware download)
+#
+# Total: 4MB = 0x400000
+#
+# Name,   Type, SubType, Offset,    Size,     Flags
+nvs,      data, nvs,     0x9000,    0x5000,
+otadata,  data, ota,     0xe000,    0x2000,
+app0,     app,  ota_0,   0x10000,   0x180000,
+app1,     app,  ota_1,   0x190000,  0x180000,
+spiffs,   data, spiffs,  0x310000,  0xF0000,

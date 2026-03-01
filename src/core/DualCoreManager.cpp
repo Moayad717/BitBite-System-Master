@@ -6,6 +6,7 @@
 #include "../tasks/TaskScheduler.h"
 #include "../storage/OfflineQueueManager.h"
 #include "../core/DeviceManager.h"
+#include "../ota/OTAManager.h"
 
 // External references (defined in main.cpp)
 extern WiFiConnectionManager wifiManager;
@@ -14,6 +15,7 @@ extern StreamManager streamManager;
 extern TaskScheduler taskScheduler;
 extern OfflineQueueManager offlineQueue;
 extern DeviceManager deviceManager;
+extern OTAManager otaManager;
 
 // ============================================================================
 // GLOBAL HANDLES
@@ -153,6 +155,10 @@ static void networkTask(void* param) {
 
         // Scheduled tasks (heartbeat, time sync, offline flush)
         taskScheduler.tick();
+
+        // OTA update check — polls GitHub every 30 min, downloads if newer
+        // Self-update reboots the device; feeder update signals Core 1 via flag
+        otaManager.tick();
 
         // Yield to other Core 0 tasks (WiFi stack, etc.)
         vTaskDelay(pdMS_TO_TICKS(50));

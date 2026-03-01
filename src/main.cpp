@@ -29,6 +29,10 @@
 // Phase 4: Dual-Core
 #include "core/DualCoreManager.h"
 
+// Phase 5: OTA Updates
+#include "ota/OTAManager.h"
+#include "ota/SerialOTAForwarder.h"
+
 // ============================================================================
 // GLOBAL INSTANCES
 // ============================================================================
@@ -46,6 +50,10 @@ SensorStatus sensorStatus;
 // Phase 3: Storage and Tasks
 OfflineQueueManager offlineQueue;
 TaskScheduler taskScheduler;
+
+// Phase 5: OTA
+OTAManager otaManager;
+SerialOTAForwarder serialOTAForwarder;
 
 // ============================================================================
 // FORWARD DECLARATIONS
@@ -190,6 +198,9 @@ void setup() {
         serialProtocol.begin(&firebaseManager, &deviceManager, &timeManager, &offlineQueue);
     }
 
+    // Initialize OTA manager (polls GitHub every 30 min for new firmware)
+    otaManager.begin(&serialOTAForwarder);
+
     // Register periodic tasks with scheduler
     static TimeSyncTask timeSyncTask(&wifiManager, &timeManager, TIME_SYNC_INTERVAL);
     taskScheduler.registerTask(&timeSyncTask);
@@ -231,8 +242,22 @@ void loop() {
     // Monitor memory
     MemoryMonitor::tick();
 
+    // If OTAManager downloaded a new feeder firmware, forward it over Serial2.
+    // This is blocking (can take several minutes at 9600 baud) — Serial2 is
+    // owned exclusively by SerialOTAForwarder during this time.
+    if (otaManager.feederUpdateReady() && !serialOTAForwarder.isForwarding()) {
+        LOG_INFO("Feeder OTA ready — starting Serial2 transfer...");
+        Watchdog::disable();
+        serialOTAForwarder.forward(otaManager.getFeederFirmwarePath());
+        Watchdog::begin(30000);
+        otaManager.clearFeederUpdateFlag();
+    }
+
     // Handle serial communication with Feeding ESP (latency-sensitive)
-    serialProtocol.tick();
+    // Skip while OTA is forwarding — SerialOTAForwarder owns Serial2
+    if (!serialOTAForwarder.isForwarding()) {
+        serialProtocol.tick();
+    }
 
     // Update OLED display every 2 seconds
     static unsigned long lastOledUpdate = 0;
