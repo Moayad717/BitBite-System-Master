@@ -31,18 +31,15 @@ jobs:
 
       - name: Generate Credentials.h from GitHub Secrets
         run: |
-          cat > src/config/Credentials.h << 'EOF'
-          #pragma once
-          EOF
-          echo "#define API_KEY \"${{ secrets.FIREBASE_API_KEY }}\"" >> src/config/Credentials.h
-          echo "#define DATABASE_URL \"${{ secrets.FIREBASE_DATABASE_URL }}\"" >> src/config/Credentials.h
-          cat >> src/config/Credentials.h << 'EOF'
-          #define OTA_WIFI_REPO   "Moayad717/BitBite-System-Master"
-          #define OTA_FEEDER_REPO "Moayad717/BitBite-System-Controller"
-          #define OTA_GITHUB_TOKEN ""
-          #define OTA_CHECK_INTERVAL_MS  (30UL * 60UL * 1000UL)
-          EOF
-          echo "Credentials.h generated"
+          printf '#pragma once\n' > src/config/Credentials.h
+          printf '#define API_KEY "%s"\n' "${{ secrets.FIREBASE_API_KEY }}" >> src/config/Credentials.h
+          printf '#define DATABASE_URL "%s"\n' "${{ secrets.FIREBASE_DATABASE_URL }}" >> src/config/Credentials.h
+          printf '#define OTA_WIFI_REPO "Moayad717/BitBite-System-Master"\n' >> src/config/Credentials.h
+          printf '#define OTA_FEEDER_REPO "Moayad717/BitBite-System-Controller"\n' >> src/config/Credentials.h
+          printf '#define OTA_GITHUB_TOKEN ""\n' >> src/config/Credentials.h
+          printf '#define OTA_CHECK_INTERVAL_MS (30UL * 60UL * 1000UL)\n' >> src/config/Credentials.h
+          echo "Credentials.h generated:"
+          cat src/config/Credentials.h
 
       - name: Write firmware version into Version.h
         run: |
