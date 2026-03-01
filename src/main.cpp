@@ -246,9 +246,17 @@ void loop() {
     // This is blocking (can take several minutes at 9600 baud) — Serial2 is
     // owned exclusively by SerialOTAForwarder during this time.
     if (otaManager.feederUpdateReady() && !serialOTAForwarder.isForwarding()) {
-        LOG_INFO("Feeder OTA ready — starting Serial2 transfer...");
-        serialOTAForwarder.forward(otaManager.getFeederFirmwarePath());
-        otaManager.clearFeederUpdateFlag();
+        static unsigned long lastForwardAttemptMs = 0;
+        if (millis() - lastForwardAttemptMs >= 30000) {
+            lastForwardAttemptMs = millis();
+            LOG_INFO("Feeder OTA ready — starting Serial2 transfer...");
+            if (serialOTAForwarder.forward(otaManager.getFeederFirmwarePath())) {
+                otaManager.confirmFeederDelivered();
+                otaManager.clearFeederUpdateFlag();
+            } else {
+                LOG_WARN("Feeder OTA transfer failed — will retry in 30s");
+            }
+        }
     }
 
     // Handle serial communication with Feeding ESP (latency-sensitive)

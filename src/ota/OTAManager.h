@@ -30,8 +30,11 @@ public:
     // Returns true when feeder firmware has been downloaded and is ready to forward
     bool feederUpdateReady() const { return feederUpdateReady_; }
 
-    // Call from Core 1 after SerialOTAForwarder finishes forwarding
+    // Call from Core 1 after SerialOTAForwarder finishes forwarding successfully
     void clearFeederUpdateFlag() { feederUpdateReady_ = false; }
+
+    // Call from Core 1 after successful forwarding to persist the delivered version
+    void confirmFeederDelivered() { setStoredVersion("feeder_ver", pendingFeederTag_); }
 
     // Path on SPIFFS where feeder firmware is stored
     const char* getFeederFirmwarePath() const { return "/feeder_ota.bin"; }
@@ -41,6 +44,7 @@ private:
     Preferences prefs_;
     unsigned long lastCheckMs_;
     bool feederUpdateReady_;
+    String pendingFeederTag_;
 
     // Check and apply WiFi ESP self-update — returns true if update was applied
     bool checkWiFiUpdate();

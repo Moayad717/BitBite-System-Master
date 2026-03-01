@@ -96,7 +96,7 @@ bool OTAManager::checkFeederUpdate() {
     LOG_INFO("[%s] Feeder update available! %s -> %s", TAG, stored.c_str(), remoteTag.c_str());
 
     if (downloadToSPIFFS(downloadUrl, getFeederFirmwarePath())) {
-        setStoredVersion("feeder_ver", remoteTag);
+        pendingFeederTag_ = remoteTag;  // committed to NVS only after successful Serial2 delivery
         feederUpdateReady_ = true;
         LOG_INFO("[%s] Feeder firmware ready in SPIFFS, waiting for Serial2 window", TAG);
         return true;
