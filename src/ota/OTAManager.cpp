@@ -198,6 +198,8 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
     WiFiClient* stream = http.getStreamPtr();
     uint8_t buf[1024];
     size_t written = 0;
+    size_t lastLogAt = 0;
+    unsigned long lastDataMs = millis();
 
     while (http.connected() || stream->available()) {
         size_t available = stream->available();
@@ -206,8 +208,23 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
             size_t bytesRead = stream->readBytes(buf, toRead);
             Update.write(buf, bytesRead);
             written += bytesRead;
-            Watchdog::feed();  // Keep WDT alive — download can take 30-60 seconds
+            lastDataMs = millis();
+            Watchdog::feed();
+
+            // Log progress every 128KB
+            if (written - lastLogAt >= 131072) {
+                lastLogAt = written;
+                int pct = totalSize > 0 ? (int)(100 * written / totalSize) : 0;
+                LOG_INFO("[%s] WiFi OTA: %u / %d bytes (%d%%)", TAG, written, totalSize, pct);
+            }
         } else {
+            // Stall detection — abort if no data for 15 seconds
+            if (millis() - lastDataMs > 15000) {
+                LOG_ERROR("[%s] Download stalled (no data for 15s) — aborting", TAG);
+                Update.abort();
+                http.end();
+                return false;
+            }
             delay(1);
         }
     }
@@ -273,6 +290,8 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
     WiFiClient* stream = http.getStreamPtr();
     uint8_t buf[512];
     int totalWritten = 0;
+    int lastLogAt = 0;
+    unsigned long lastDataMs = millis();
 
     while (http.connected() || stream->available()) {
         size_t available = stream->available();
@@ -281,8 +300,23 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
             size_t bytesRead = stream->readBytes(buf, toRead);
             f.write(buf, bytesRead);
             totalWritten += bytesRead;
-            Watchdog::feed();  // Keep WDT alive during multi-second download
+            lastDataMs = millis();
+            Watchdog::feed();
+
+            // Log progress every 128KB
+            if (totalWritten - lastLogAt >= 131072) {
+                lastLogAt = totalWritten;
+                int pct = totalSize > 0 ? (int)(100 * totalWritten / totalSize) : 0;
+                LOG_INFO("[%s] Feeder OTA: %d / %d bytes (%d%%)", TAG, totalWritten, totalSize, pct);
+            }
         } else {
+            if (millis() - lastDataMs > 15000) {
+                LOG_ERROR("[%s] Feeder download stalled — aborting", TAG);
+                f.close();
+                SPIFFS.remove(spiffsPath);
+                http.end();
+                return false;
+            }
             delay(1);
         }
     }
