@@ -247,9 +247,7 @@ void loop() {
     // owned exclusively by SerialOTAForwarder during this time.
     if (otaManager.feederUpdateReady() && !serialOTAForwarder.isForwarding()) {
         LOG_INFO("Feeder OTA ready — starting Serial2 transfer...");
-        Watchdog::disable();
         serialOTAForwarder.forward(otaManager.getFeederFirmwarePath());
-        Watchdog::begin(30000);
         otaManager.clearFeederUpdateFlag();
     }
 

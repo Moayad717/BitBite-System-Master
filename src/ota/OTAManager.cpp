@@ -193,11 +193,24 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
         return false;
     }
 
-    // Disable watchdog — download can take 15-30 seconds on slow connections
-    Watchdog::disable();
-
+    // Write firmware in chunks, feeding the watchdog each iteration so
+    // Core 1's loopTask keeps the WDT alive during the multi-second download.
     WiFiClient* stream = http.getStreamPtr();
-    size_t written = Update.writeStream(*stream);
+    uint8_t buf[1024];
+    size_t written = 0;
+
+    while (http.connected() || stream->available()) {
+        size_t available = stream->available();
+        if (available) {
+            size_t toRead = min(available, sizeof(buf));
+            size_t bytesRead = stream->readBytes(buf, toRead);
+            Update.write(buf, bytesRead);
+            written += bytesRead;
+            Watchdog::feed();  // Keep WDT alive — download can take 30-60 seconds
+        } else {
+            delay(1);
+        }
+    }
 
     if ((int)written != totalSize) {
         LOG_WARN("[%s] Wrote %u / %d bytes", TAG, written, totalSize);
@@ -257,8 +270,6 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
         return false;
     }
 
-    Watchdog::disable();
-
     WiFiClient* stream = http.getStreamPtr();
     uint8_t buf[512];
     int totalWritten = 0;
@@ -270,8 +281,9 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
             size_t bytesRead = stream->readBytes(buf, toRead);
             f.write(buf, bytesRead);
             totalWritten += bytesRead;
+            Watchdog::feed();  // Keep WDT alive during multi-second download
         } else {
-            delay(1);  // Yield while waiting for more data
+            delay(1);
         }
     }
 
