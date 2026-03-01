@@ -201,26 +201,28 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
     size_t lastLogAt = 0;
     unsigned long lastDataMs = millis();
 
-    while (http.connected() || stream->available()) {
-        size_t available = stream->available();
-        if (available) {
-            size_t toRead = min(available, sizeof(buf));
+    while (written < (size_t)totalSize) {
+        if (stream->available()) {
+            size_t remaining = (size_t)totalSize - written;
+            size_t toRead = min((size_t)stream->available(), min(sizeof(buf), remaining));
             size_t bytesRead = stream->readBytes(buf, toRead);
-            Update.write(buf, bytesRead);
-            written += bytesRead;
-            lastDataMs = millis();
-            Watchdog::feed();
+            if (bytesRead > 0) {
+                Update.write(buf, bytesRead);
+                written += bytesRead;
+                lastDataMs = millis();
+                Watchdog::feed();
 
-            // Log progress every 128KB
-            if (written - lastLogAt >= 131072) {
-                lastLogAt = written;
-                int pct = totalSize > 0 ? (int)(100 * written / totalSize) : 0;
-                LOG_INFO("[%s] WiFi OTA: %u / %d bytes (%d%%)", TAG, written, totalSize, pct);
+                // Log progress every 128KB
+                if (written - lastLogAt >= 131072) {
+                    lastLogAt = written;
+                    int pct = (int)(100 * written / totalSize);
+                    LOG_INFO("[%s] WiFi OTA: %u / %d bytes (%d%%)", TAG, written, totalSize, pct);
+                }
             }
         } else {
-            // Stall detection — abort if no data for 15 seconds
+            if (!http.connected()) break;  // Connection closed — exit even if short
             if (millis() - lastDataMs > 15000) {
-                LOG_ERROR("[%s] Download stalled (no data for 15s) — aborting", TAG);
+                LOG_ERROR("[%s] Download stalled — aborting", TAG);
                 Update.abort();
                 http.end();
                 return false;
@@ -293,23 +295,26 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
     int lastLogAt = 0;
     unsigned long lastDataMs = millis();
 
-    while (http.connected() || stream->available()) {
-        size_t available = stream->available();
-        if (available) {
-            size_t toRead = min(available, sizeof(buf));
+    while (totalSize <= 0 || totalWritten < totalSize) {
+        if (stream->available()) {
+            size_t remaining = totalSize > 0 ? (size_t)(totalSize - totalWritten) : sizeof(buf);
+            size_t toRead = min((size_t)stream->available(), min(sizeof(buf), remaining));
             size_t bytesRead = stream->readBytes(buf, toRead);
-            f.write(buf, bytesRead);
-            totalWritten += bytesRead;
-            lastDataMs = millis();
-            Watchdog::feed();
+            if (bytesRead > 0) {
+                f.write(buf, bytesRead);
+                totalWritten += bytesRead;
+                lastDataMs = millis();
+                Watchdog::feed();
 
-            // Log progress every 128KB
-            if (totalWritten - lastLogAt >= 131072) {
-                lastLogAt = totalWritten;
-                int pct = totalSize > 0 ? (int)(100 * totalWritten / totalSize) : 0;
-                LOG_INFO("[%s] Feeder OTA: %d / %d bytes (%d%%)", TAG, totalWritten, totalSize, pct);
+                // Log progress every 128KB
+                if (totalWritten - lastLogAt >= 131072) {
+                    lastLogAt = totalWritten;
+                    int pct = totalSize > 0 ? (int)(100 * totalWritten / totalSize) : 0;
+                    LOG_INFO("[%s] Feeder OTA: %d / %d bytes (%d%%)", TAG, totalWritten, totalSize, pct);
+                }
             }
         } else {
+            if (!http.connected()) break;
             if (millis() - lastDataMs > 15000) {
                 LOG_ERROR("[%s] Feeder download stalled — aborting", TAG);
                 f.close();
