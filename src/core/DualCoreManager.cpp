@@ -7,6 +7,7 @@
 #include "../storage/OfflineQueueManager.h"
 #include "../core/DeviceManager.h"
 #include "../ota/OTAManager.h"
+#include "../ota/SerialOTAForwarder.h"
 
 // External references (defined in main.cpp)
 extern WiFiConnectionManager wifiManager;
@@ -16,6 +17,7 @@ extern TaskScheduler taskScheduler;
 extern OfflineQueueManager offlineQueue;
 extern DeviceManager deviceManager;
 extern OTAManager otaManager;
+extern SerialOTAForwarder serialOTAForwarder;
 
 // ============================================================================
 // GLOBAL HANDLES
@@ -169,9 +171,14 @@ static void networkTask(void* param) {
         // Scheduled tasks (heartbeat, time sync, offline flush)
         taskScheduler.tick();
 
-        // OTA update check — polls GitHub every 30 min, downloads if newer
-        // Self-update reboots the device; feeder update signals Core 1 via flag
-        otaManager.tick();
+        // OTA update check — polls GitHub every 30 min, downloads if newer.
+        // Skipped while Core 1 is forwarding feeder firmware: applyWiFiFirmware()
+        // calls Update.write() which disables the ESP32 flash cache on BOTH cores,
+        // causing concurrent SPIFFS reads on Core 1 to return 0 bytes and abort
+        // the feeder transfer.
+        if (!serialOTAForwarder.isForwarding()) {
+            otaManager.tick();
+        }
 
         // Yield to other Core 0 tasks (WiFi stack, etc.)
         vTaskDelay(pdMS_TO_TICKS(50));

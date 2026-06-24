@@ -42,7 +42,7 @@ public:
     bool isForwarding() const { return forwarding_; }
 
 private:
-    bool forwarding_;
+    volatile bool forwarding_;  // read by Core 0, written by Core 1 — must be volatile
 
     static const size_t  CHUNK_SIZE       = 256;   // Bytes per chunk (512 hex chars)
     static const int     MAX_RETRIES      = 3;
