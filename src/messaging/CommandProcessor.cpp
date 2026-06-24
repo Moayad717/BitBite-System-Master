@@ -1,6 +1,7 @@
 #include "CommandProcessor.h"
 #include "SerialProtocol.h"
 #include "../core/LogManager.h"
+#include "../core/DualCoreManager.h"
 
 // ============================================================================
 // CONSTRUCTOR
@@ -66,21 +67,15 @@ void CommandProcessor::handleSyncName() {
 
 void CommandProcessor::handleClearFaults() {
     LOG_INFO("Command: Clear faults on Feeding ESP");
-
-    // Forward to Feeding ESP via Serial2
-    Serial2.println("CLEAR_FAULTS");
+    enqueueSerial2Cmd("CLEAR_FAULTS");
 }
 
 void CommandProcessor::handleGetScheduleStatus() {
     LOG_INFO("Command: Get schedule status from Feeding ESP");
-
-    // Forward to Feeding ESP via Serial2
-    Serial2.println("GET_SCHEDULE_STATUS");
+    enqueueSerial2Cmd("GET_SCHEDULE_STATUS");
 }
 
 void CommandProcessor::handleGenericCommand(const String& commandType) {
     LOG_INFO("Forwarding command to Feeding ESP: %s", commandType.c_str());
-
-    // Forward to Feeding ESP via Serial2
-    Serial2.println(commandType);
+    enqueueSerial2Cmd(commandType.c_str());
 }

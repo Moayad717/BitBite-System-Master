@@ -30,10 +30,12 @@ struct FirebaseQueueItem {
 
 // Queue and mutex handles (defined in DualCoreManager.cpp)
 extern QueueHandle_t firebaseQueue;
+extern QueueHandle_t serial2CmdQueue;
 extern SemaphoreHandle_t logMutex;
 
-// Queue helper — push an item from any core (non-blocking)
+// Queue helpers — push items from any core (non-blocking)
 bool enqueueFirebaseWrite(QueueItemType type, const char* jsonData);
+bool enqueueSerial2Cmd(const char* cmd);
 
 // Start the network task on Core 0
 void startNetworkTask();

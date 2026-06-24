@@ -35,6 +35,14 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
     uint32_t crc = calculateFileCRC32(spiffsPath);
     f.seek(0);
 
+    // Sanity-check: the file must contain exactly what it should before we start.
+    // This catches silent SPIFFS write failures where size() diverges from actual data.
+    if (totalSize == 0) {
+        LOG_ERROR("[%s] Firmware file is empty (size=0): %s", TAG, spiffsPath);
+        f.close();
+        return false;
+    }
+
     LOG_INFO("[%s] Starting feeder OTA: %u bytes, CRC32=0x%08X", TAG, totalSize, crc);
     forwarding_ = true;
 
@@ -58,37 +66,44 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
 
     // ---- Send chunks ----
     uint8_t buf[CHUNK_SIZE];
-    int seq = 0;
     size_t bytesSent = 0;
     size_t totalChunks = (totalSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-    while (f.available()) {
-        size_t len = f.readBytes((char*)buf, CHUNK_SIZE);
-        if (len == 0) break;
+    // Iterate by explicit count, not f.available(), so a premature SPIFFS EOF is a
+    // hard error with a clear log rather than a silent early OTA_END.
+    for (size_t seq = 0; seq < totalChunks; seq++) {
+        size_t expected = min((size_t)CHUNK_SIZE, totalSize - bytesSent);
+        size_t len = f.read(buf, expected);
+        if (len != expected) {
+            LOG_ERROR("[%s] SPIFFS read failed at chunk %u: got %u/%u bytes (file truncated?)",
+                      TAG, seq, len, expected);
+            f.close();
+            forwarding_ = false;
+            return false;
+        }
 
         bool ok = false;
         for (int retry = 0; retry < MAX_RETRIES && !ok; retry++) {
             if (retry > 0) {
-                LOG_WARN("[%s] Chunk %d: retry %d", TAG, seq, retry);
+                LOG_WARN("[%s] Chunk %u: retry %d", TAG, seq, retry);
             }
-            ok = sendChunkAndWaitAck(seq, buf, len);
+            ok = sendChunkAndWaitAck((int)seq, buf, len);
         }
 
         if (!ok) {
-            LOG_ERROR("[%s] Chunk %d failed after %d retries — aborting OTA", TAG, seq, MAX_RETRIES);
+            LOG_ERROR("[%s] Chunk %u failed after %d retries — aborting OTA", TAG, seq, MAX_RETRIES);
             f.close();
             forwarding_ = false;
             return false;
         }
 
         bytesSent += len;
-        seq++;
 
-        // Feed watchdog — chunk loop can run for many minutes at 9600 baud
+        // Feed watchdog — chunk loop can take minutes at low baud rates
         Watchdog::feed();
 
-        // Progress log every ~10%
-        if (totalChunks > 0 && seq % max(1, (int)(totalChunks / 10)) == 0) {
+        // Progress log at 10% intervals
+        if (totalChunks > 0 && (seq + 1) % max((size_t)1, totalChunks / 10) == 0) {
             LOG_INFO("[%s] Progress: %u/%u bytes (%.0f%%)",
                      TAG, bytesSent, totalSize, 100.0f * bytesSent / totalSize);
         }
@@ -106,7 +121,7 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
     }
 
     if (response == "OTA_OK") {
-        LOG_INFO("[%s] Feeder OTA complete! Sent %d chunks (%u bytes)", TAG, seq, bytesSent);
+        LOG_INFO("[%s] Feeder OTA complete! Sent %u chunks (%u bytes)", TAG, totalChunks, bytesSent);
         SPIFFS.remove(spiffsPath);  // Clean up downloaded binary
         forwarding_ = false;
         return true;

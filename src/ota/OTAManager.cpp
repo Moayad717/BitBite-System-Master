@@ -267,7 +267,10 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
 // ============================================================================
 
 bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
-    // Check available SPIFFS space
+    // Delete any stale file first — ensures a clean write and accurate free-space reading.
+    // Opening with "w" alone is unreliable in old SPIFFS for truncation.
+    SPIFFS.remove(spiffsPath);
+
     size_t freeBytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
     LOG_INFO("[%s] SPIFFS free: %u bytes", TAG, freeBytes);
 
@@ -315,8 +318,16 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
             size_t toRead = min((size_t)stream->available(), min(sizeof(buf), remaining));
             size_t bytesRead = stream->readBytes(buf, toRead);
             if (bytesRead > 0) {
-                f.write(buf, bytesRead);
-                totalWritten += bytesRead;
+                size_t wroteBytes = f.write(buf, bytesRead);
+                if (wroteBytes != bytesRead) {
+                    LOG_ERROR("[%s] SPIFFS write failed at offset %d: wrote %u of %u bytes (partition full?)",
+                              TAG, totalWritten, wroteBytes, bytesRead);
+                    f.close();
+                    SPIFFS.remove(spiffsPath);
+                    http.end();
+                    return false;
+                }
+                totalWritten += (int)wroteBytes;
                 lastDataMs = millis();
                 Watchdog::feed();
 
@@ -358,7 +369,24 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
         return false;
     }
 
-    LOG_INFO("[%s] Feeder firmware saved: %d bytes -> %s", TAG, totalWritten, spiffsPath);
+    // Re-open and verify the file size matches what we wrote — catches SPIFFS metadata bugs
+    // where f.size() diverges from actual stored bytes.
+    File verify = SPIFFS.open(spiffsPath, "r");
+    if (!verify) {
+        LOG_ERROR("[%s] Cannot re-open %s for verification", TAG, spiffsPath);
+        SPIFFS.remove(spiffsPath);
+        return false;
+    }
+    size_t storedSize = verify.size();
+    verify.close();
+    if ((int)storedSize != totalWritten) {
+        LOG_ERROR("[%s] SPIFFS size mismatch: wrote %d bytes but file reports %u — aborting",
+                  TAG, totalWritten, storedSize);
+        SPIFFS.remove(spiffsPath);
+        return false;
+    }
+
+    LOG_INFO("[%s] Feeder firmware saved and verified: %d bytes -> %s", TAG, totalWritten, spiffsPath);
     return true;
 }
 

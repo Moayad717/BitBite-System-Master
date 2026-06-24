@@ -92,8 +92,8 @@ void setup() {
 
     // Initialize Serial2 for Feeding ESP communication (increased buffers for large JSON)
     Serial2.setTxBufferSize(2048);
-    Serial2.setRxBufferSize(512);
-    Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+    Serial2.setRxBufferSize(1024);
+    Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
     LOG_INFO("Serial2 initialized for Feeding ESP (RX: %d, TX: %d)", RXD2, TXD2);
 
     // NOTE: Watchdog started AFTER time sync to prevent timeout during NTP
@@ -263,6 +263,13 @@ void loop() {
     // Skip while OTA is forwarding — SerialOTAForwarder owns Serial2
     if (!serialOTAForwarder.isForwarding()) {
         serialProtocol.tick();
+
+        // Drain commands queued by Core 0 (CommandProcessor) — sent only when
+        // Serial2 is free so they never collide with OTA chunk traffic.
+        char cmd[64];
+        while (xQueueReceive(serial2CmdQueue, cmd, 0) == pdTRUE) {
+            Serial2.println(cmd);
+        }
     }
 
     // Update OLED display every 2 seconds

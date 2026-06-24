@@ -21,14 +21,27 @@ extern OTAManager otaManager;
 // GLOBAL HANDLES
 // ============================================================================
 
-QueueHandle_t firebaseQueue = nullptr;
-SemaphoreHandle_t logMutex = nullptr;
+QueueHandle_t firebaseQueue   = nullptr;
+QueueHandle_t serial2CmdQueue = nullptr;
+SemaphoreHandle_t logMutex    = nullptr;
 
 static TaskHandle_t networkTaskHandle = nullptr;
 
 // ============================================================================
-// QUEUE HELPER
+// QUEUE HELPERS
 // ============================================================================
+
+bool enqueueSerial2Cmd(const char* cmd) {
+    if (!serial2CmdQueue || !cmd) return false;
+    char buf[64];
+    strncpy(buf, cmd, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    if (xQueueSend(serial2CmdQueue, buf, 0) != pdTRUE) {
+        LOG_WARN("Serial2 cmd queue full, dropping: %s", cmd);
+        return false;
+    }
+    return true;
+}
 
 bool enqueueFirebaseWrite(QueueItemType type, const char* jsonData) {
     if (!firebaseQueue || !jsonData) {
@@ -170,10 +183,17 @@ static void networkTask(void* param) {
 // ============================================================================
 
 void startNetworkTask() {
-    // Create the inter-core queue (10 items deep)
+    // Create the inter-core Firebase queue (10 items deep)
     firebaseQueue = xQueueCreate(10, sizeof(FirebaseQueueItem));
     if (!firebaseQueue) {
         LOG_ERROR("Failed to create Firebase queue!");
+        return;
+    }
+
+    // Create the Serial2 command queue (8 slots × 64 bytes — Core 0 enqueues, Core 1 drains)
+    serial2CmdQueue = xQueueCreate(8, 64);
+    if (!serial2CmdQueue) {
+        LOG_ERROR("Failed to create Serial2 command queue!");
         return;
     }
 
