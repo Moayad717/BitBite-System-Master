@@ -220,7 +220,11 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
                 }
             }
         } else {
-            if (!http.connected()) break;  // Connection closed — exit even if short
+            // Only break on connection close when we've already received all
+            // expected bytes (or Content-Length was absent). Between TLS records
+            // available() can transiently return 0 while the server FIN is visible
+            // at the TCP layer — breaking here would truncate the write.
+            if (!http.connected() && (totalSize <= 0 || written >= (size_t)totalSize)) break;
             if (millis() - lastDataMs > 15000) {
                 LOG_ERROR("[%s] Download stalled — aborting", TAG);
                 Update.abort();
@@ -314,7 +318,11 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
                 }
             }
         } else {
-            if (!http.connected()) break;
+            // Only break on connection close when all expected bytes are in hand (or
+            // Content-Length was absent). available() transiently returns 0 between TLS
+            // records while the server FIN is already visible at the TCP layer — an
+            // early break here is the root cause of the partial-file OTA_END bug.
+            if (!http.connected() && (totalSize <= 0 || totalWritten >= (size_t)totalSize)) break;
             if (millis() - lastDataMs > 15000) {
                 LOG_ERROR("[%s] Feeder download stalled — aborting", TAG);
                 f.close();
@@ -329,6 +337,11 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
     f.close();
     http.end();
 
+    if (totalSize > 0 && totalWritten < totalSize) {
+        LOG_ERROR("[%s] Incomplete download: %d / %d bytes — aborting", TAG, totalWritten, totalSize);
+        SPIFFS.remove(spiffsPath);
+        return false;
+    }
     if (totalWritten == 0) {
         LOG_ERROR("[%s] Download produced 0 bytes", TAG);
         SPIFFS.remove(spiffsPath);
