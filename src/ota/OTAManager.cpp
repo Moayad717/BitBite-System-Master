@@ -39,10 +39,10 @@ void OTAManager::tick() {
     // Self-update check first — if applied, device reboots here and never returns
     checkWiFiUpdate();
 
-    // Feeder update (only if not already downloaded and waiting)
-    if (!feederUpdateReady_) {
-        checkFeederUpdate();
-    }
+    // Always check for a newer feeder release, even when a binary is already
+    // staged in SPIFFS. checkFeederUpdate() will replace a stale pending binary
+    // if GitHub has published a newer version since it was downloaded.
+    checkFeederUpdate();
 }
 
 // ============================================================================
@@ -85,15 +85,25 @@ bool OTAManager::checkFeederUpdate() {
         return false;
     }
 
-    String stored = getStoredVersion("feeder_ver");
-    LOG_INFO("[%s] Feeder: stored=%s  latest=%s", TAG, stored.c_str(), remoteTag.c_str());
+    // Compare against the pending tag when a binary is already staged, so we
+    // catch releases published after the last download. Fall back to the
+    // NVS-delivered version when no binary is pending.
+    String baseline = feederUpdateReady_ ? pendingFeederTag_ : getStoredVersion("feeder_ver");
+    LOG_INFO("[%s] Feeder: baseline=%s  latest=%s", TAG, baseline.c_str(), remoteTag.c_str());
 
-    if (!isNewer(remoteTag, stored)) {
+    if (!isNewer(remoteTag, baseline)) {
         LOG_INFO("[%s] Feeder firmware is up to date", TAG);
         return false;
     }
 
-    LOG_INFO("[%s] Feeder update available! %s -> %s", TAG, stored.c_str(), remoteTag.c_str());
+    if (feederUpdateReady_) {
+        LOG_INFO("[%s] Newer feeder release (%s > %s) — replacing pending binary",
+                 TAG, remoteTag.c_str(), baseline.c_str());
+        SPIFFS.remove(getFeederFirmwarePath());
+        feederUpdateReady_ = false;
+    } else {
+        LOG_INFO("[%s] Feeder update available! %s -> %s", TAG, baseline.c_str(), remoteTag.c_str());
+    }
 
     if (downloadToSPIFFS(downloadUrl, getFeederFirmwarePath())) {
         pendingFeederTag_ = remoteTag;  // committed to NVS only after successful Serial2 delivery
