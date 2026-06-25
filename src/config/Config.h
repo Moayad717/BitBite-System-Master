@@ -5,8 +5,9 @@
 // ============================================================================
 
 // Serial2 Communication with Feeding ESP
-#define RXD2 16
-#define TXD2 17
+#define RXD2         16
+#define TXD2         17
+#define SERIAL2_BAUD 115200   // Must match Feeding ESP (src/config/Config.h)
 
 // Portal Button (for WiFiManager)
 #define PORTAL_BUTTON_PIN 33

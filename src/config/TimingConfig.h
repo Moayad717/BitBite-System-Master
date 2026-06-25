@@ -28,6 +28,21 @@
 #define SCHEDULE_SYNC_TIMEOUT 5000          // 5 seconds timeout for confirmation
 #define SCHEDULE_STATUS_TIMEOUT 10000       // 10 seconds timeout for multi-line status collection
 
+// Feeder OTA forwarding
+#define FEEDER_OTA_RETRY_MS  30000          // Minimum gap between Serial2 transfer attempts
+
+// OTA HTTP
+#define OTA_API_TIMEOUT_MS   15000          // GitHub API request timeout
+#define OTA_HTTP_TIMEOUT_MS  60000          // Firmware binary download timeout
+#define OTA_STALL_TIMEOUT_MS 15000          // Abort download if no data for this long
+
+// Watchdog
+#define WATCHDOG_TIMEOUT_MS  30000          // Hardware watchdog
+
+// Core 1 loop
+#define LOOP_DELAY_MS        50             // Keeps Core 1 from busy-spinning
+#define STATUS_LOG_INTERVAL_MS 300000       // "System online" console log (5 minutes)
+
 // NTP Configuration
 #define NTP_SERVER_1 "time.google.com"
 #define NTP_SERVER_2 "time.cloudflare.com"

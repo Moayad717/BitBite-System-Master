@@ -4,6 +4,7 @@
 #include "../utils/Watchdog.h"
 #include "../config/Credentials.h"
 #include "../config/Version.h"
+#include "../config/TimingConfig.h"
 
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -132,7 +133,7 @@ bool OTAManager::fetchReleaseInfo(const char* repo, String& outTag, String& outU
     if (strlen(OTA_GITHUB_TOKEN) > 0) {
         http.addHeader("Authorization", String("Bearer ") + OTA_GITHUB_TOKEN);
     }
-    http.setTimeout(15000);
+    http.setTimeout(OTA_API_TIMEOUT_MS);
 
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
@@ -185,7 +186,7 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
         http.addHeader("Authorization", String("Bearer ") + OTA_GITHUB_TOKEN);
     }
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.setTimeout(60000);
+    http.setTimeout(OTA_HTTP_TIMEOUT_MS);
 
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
@@ -235,7 +236,7 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
             // available() can transiently return 0 while the server FIN is visible
             // at the TCP layer — breaking here would truncate the write.
             if (!http.connected() && (totalSize <= 0 || written >= (size_t)totalSize)) break;
-            if (millis() - lastDataMs > 15000) {
+            if (millis() - lastDataMs > OTA_STALL_TIMEOUT_MS) {
                 LOG_ERROR("[%s] Download stalled — aborting", TAG);
                 Update.abort();
                 http.end();
@@ -283,7 +284,7 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
         http.addHeader("Authorization", String("Bearer ") + OTA_GITHUB_TOKEN);
     }
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.setTimeout(60000);
+    http.setTimeout(OTA_HTTP_TIMEOUT_MS);
 
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
@@ -344,7 +345,7 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
             // records while the server FIN is already visible at the TCP layer — an
             // early break here is the root cause of the partial-file OTA_END bug.
             if (!http.connected() && (totalSize <= 0 || totalWritten >= (size_t)totalSize)) break;
-            if (millis() - lastDataMs > 15000) {
+            if (millis() - lastDataMs > OTA_STALL_TIMEOUT_MS) {
                 LOG_ERROR("[%s] Feeder download stalled — aborting", TAG);
                 f.close();
                 SPIFFS.remove(spiffsPath);

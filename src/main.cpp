@@ -93,7 +93,7 @@ void setup() {
     // Initialize Serial2 for Feeding ESP communication (increased buffers for large JSON)
     Serial2.setTxBufferSize(2048);
     Serial2.setRxBufferSize(1024);
-    Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+    Serial2.begin(SERIAL2_BAUD, SERIAL_8N1, RXD2, TXD2);
     LOG_INFO("Serial2 initialized for Feeding ESP (RX: %d, TX: %d)", RXD2, TXD2);
 
     // NOTE: Watchdog started AFTER time sync to prevent timeout during NTP
@@ -214,7 +214,7 @@ void setup() {
     LOG_INFO("TaskScheduler: %u tasks registered", taskScheduler.getTaskCount());
 
     // Start watchdog AFTER Firebase init (can take time)
-    Watchdog::begin(30000);  // 30 second watchdog
+    Watchdog::begin(WATCHDOG_TIMEOUT_MS);
     LOG_INFO("Watchdog started");
 
     // Start network task on Core 0 (WiFi, Firebase, tasks run there)
@@ -243,11 +243,11 @@ void loop() {
     MemoryMonitor::tick();
 
     // If OTAManager downloaded a new feeder firmware, forward it over Serial2.
-    // This is blocking (can take several minutes at 9600 baud) — Serial2 is
-    // owned exclusively by SerialOTAForwarder during this time.
+    // This is blocking (~1 minute at 115200 baud) — Serial2 is owned exclusively
+    // by SerialOTAForwarder during this time.
     if (otaManager.feederUpdateReady() && !serialOTAForwarder.isForwarding()) {
         static unsigned long lastForwardAttemptMs = 0;
-        if (millis() - lastForwardAttemptMs >= 30000) {
+        if (millis() - lastForwardAttemptMs >= FEEDER_OTA_RETRY_MS) {
             lastForwardAttemptMs = millis();
             LOG_INFO("Feeder OTA ready — starting Serial2 transfer...");
             if (serialOTAForwarder.forward(otaManager.getFeederFirmwarePath())) {
@@ -275,14 +275,14 @@ void loop() {
     // Update OLED display every 2 seconds
     static unsigned long lastOledUpdate = 0;
     unsigned long now = millis();
-    if (now - lastOledUpdate >= 2000) {
+    if (now - lastOledUpdate >= OLED_UPDATE_INTERVAL) {
         lastOledUpdate = now;
         oledDisplay.update(sensorStatus, wifiManager.getRSSI(), wifiManager.isConnected());
     }
 
-    // Status logging every 10 seconds
+    // Periodic status log
     static unsigned long lastDemo = 0;
-    if (now - lastDemo >= 10000) {
+    if (now - lastDemo >= STATUS_LOG_INTERVAL_MS) {
         lastDemo = now;
 
         if (wifiManager.isConnected()) {
@@ -303,6 +303,5 @@ void loop() {
         LOG_INFO("Free heap: %u bytes", MemoryMonitor::getFreeHeap());
     }
 
-    // Small delay — Core 1 loop is now lightweight, no network blocking
-    delay(50);
+    delay(LOOP_DELAY_MS);
 }
