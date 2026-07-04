@@ -217,6 +217,10 @@ void setup() {
     Watchdog::begin(WATCHDOG_TIMEOUT_MS);
     LOG_INFO("Watchdog started");
 
+    // networkTask loops with a 50ms vTaskDelay, so missing a heartbeat for
+    // 30s means it's genuinely stuck, not just slow.
+    Watchdog::registerTask("networkTask", 30000);
+
     // Start network task on Core 0 (WiFi, Firebase, tasks run there)
     startNetworkTask();
 
@@ -278,6 +282,14 @@ void loop() {
     if (now - lastOledUpdate >= OLED_UPDATE_INTERVAL) {
         lastOledUpdate = now;
         oledDisplay.update(sensorStatus, wifiManager.getRSSI(), wifiManager.isConnected());
+    }
+
+    // Check registered task heartbeats every 30 seconds — reboots via
+    // ESP.restart() if any task (e.g. networkTask) is found frozen.
+    static unsigned long lastTaskHealthCheck = 0;
+    if (now - lastTaskHealthCheck >= 30000) {
+        lastTaskHealthCheck = now;
+        Watchdog::checkTaskHealth();
     }
 
     // Periodic status log

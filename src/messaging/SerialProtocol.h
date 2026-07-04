@@ -22,9 +22,12 @@ class OfflineQueueManager;
 //   RX (Feeding → WiFi):
 //     - {json} (status update)
 //     - LOG:{json} (log entry)
-//     - FAULT:{json} (fault event)
+//     - FAULT_SET:<key>:{json} (fault active — set()'d to devices/{id}/faults/{key})
+//     - FAULT_CLEAR:<key> (fault resolved — deleted from devices/{id}/faults/{key})
 //     - SCHEDULE_HASH:12345 (schedule sync confirmation)
 //     - SCHEDULE_STATUS:... / SCHEDULE_ITEM:... / SCHEDULE_STATUS:END (multi-line)
+//     - SCHEDULE_EXECUTED:<scheduleId> (a scheduled feed ran — sets
+//       devices/{id}/schedules/{scheduleId}/executedToday = true)
 
 class SerialProtocol {
 public:
@@ -70,17 +73,30 @@ private:
         unsigned long startTime;
     } scheduleStatusState_;
 
+    // Incoming line buffer — fixed size, non-blocking (replaces the old
+    // Serial2.readStringUntil() which had no length bound and blocked the
+    // whole Core 1 loop for up to 1s per call while waiting for '\n').
+    static const size_t MAX_LINE_LEN = 1024;
+    char lineBuf_[MAX_LINE_LEN];
+    size_t lineIdx_;
+
+    // True while resyncing after an overflow — ignore all bytes until the
+    // next real newline, even if that takes multiple tick() calls.
+    bool discarding_;
+
     // Message handling
     void handleIncomingData();
     void processMessage(const String& message);
     void handleStatusUpdate(const String& statusJson);
     void handleLogEntry(const String& logJson);
-    void handleFaultEntry(const String& faultJson);
+    void handleFaultSet(const String& payload);
+    void handleFaultClear(const String& key);
     void handleScheduleHash(const String& hash);
     void handleScheduleStatusHeader(const String& header);
     void handleScheduleItem(const String& item);
     void handleScheduleStatusEnd();
     void sendScheduleStatusToFirebase();
+    void handleScheduleExecuted(const String& scheduleId);
 
     // Helpers
     void sendScheduleSyncStatus(bool success, const char* message);

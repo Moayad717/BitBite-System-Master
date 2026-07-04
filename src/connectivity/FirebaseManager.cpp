@@ -307,6 +307,23 @@ bool FirebaseManager::deleteNode(const char* path) {
     return false;
 }
 
+bool FirebaseManager::setBool(const char* path, bool value) {
+    if (!isReady()) {
+        lastError_ = "Firebase not ready";
+        return false;
+    }
+
+    if (Firebase.RTDB.setBool(&fbdo_, path, value)) {
+        fbdo_.clear();
+        return true;
+    }
+
+    lastError_ = fbdo_.errorReason();
+    LOG_ERROR("Firebase setBool failed: %s", lastError_.c_str());
+    fbdo_.clear();
+    return false;
+}
+
 bool FirebaseManager::getShallowData(const char* path) {
     if (!isReady()) {
         lastError_ = "Firebase not ready";
@@ -382,22 +399,6 @@ void FirebaseManager::clearError() {
 // ============================================================================
 // HELPER METHODS
 // ============================================================================
-
-bool FirebaseManager::checkInternetConnection() {
-    IPAddress result;
-
-    // Try to resolve common hostnames to verify internet connectivity
-    if (WiFi.hostByName("www.google.com", result)) {
-        return true;
-    }
-
-    // Fallback: Try cloudflare
-    if (WiFi.hostByName("cloudflare.com", result)) {
-        return true;
-    }
-
-    return false;
-}
 
 void FirebaseManager::handleAuthStateChange(bool wasReady, bool isReady) {
     if (isReady && !wasReady) {

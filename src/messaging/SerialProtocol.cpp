@@ -6,6 +6,7 @@
 #include "../core/DualCoreManager.h"
 #include "../storage/OfflineQueueManager.h"
 #include "../config/TimingConfig.h"
+#include "../config/Version.h"
 
 // ============================================================================
 // CONSTRUCTOR
@@ -16,7 +17,9 @@ SerialProtocol::SerialProtocol()
       deviceManager_(nullptr),
       timeManager_(nullptr),
       offlineQueue_(nullptr),
-      statusCallback_(nullptr) {
+      statusCallback_(nullptr),
+      lineIdx_(0),
+      discarding_(false) {
 
     scheduleSyncState_.waitingForConfirmation = false;
     scheduleSyncState_.expectedHash = "";
@@ -25,6 +28,8 @@ SerialProtocol::SerialProtocol()
     scheduleStatusState_.collecting = false;
     scheduleStatusState_.itemCount = 0;
     scheduleStatusState_.startTime = 0;
+
+    lineBuf_[0] = '\0';
 }
 
 // ============================================================================
@@ -157,26 +162,53 @@ void SerialProtocol::handleIncomingData() {
         scheduleStatusState_.collecting = false;
     }
 
-    if (!Serial2.available()) {
-        return;
+    while (Serial2.available()) {
+        char c = (char)Serial2.read();
+
+        if (discarding_) {
+            // Resyncing after an overflow — keep discarding across as many
+            // calls as it takes until we actually see a newline.
+            if (c == '\n') discarding_ = false;
+            continue;
+        }
+
+        if (c == '\n') {
+            lineBuf_[lineIdx_] = '\0';
+
+            if (lineIdx_ > 0) {
+                String message = String(lineBuf_);
+                message.trim();  // strips the trailing '\r' from Serial2.println() on the Feeder side
+
+                if (message.length() > 0) {
+                    LOG_DEBUG("Serial RX: %s", message.c_str());
+                    processMessage(message);
+                }
+            }
+
+            lineIdx_ = 0;
+            return;  // One line per tick() — keeps Core 1's loop responsive
+        }
+
+        if (lineIdx_ < MAX_LINE_LEN - 1) {
+            lineBuf_[lineIdx_++] = c;
+        } else {
+            // Line too long (noise/corruption with no '\n') — discard and
+            // resync at the next real newline, however many calls that
+            // takes, instead of only checking bytes already buffered.
+            LOG_WARN("Serial RX line too long (>%u bytes) — discarding (resyncing)", (unsigned)MAX_LINE_LEN);
+            lineIdx_ = 0;
+            discarding_ = true;
+        }
     }
-
-    String message = Serial2.readStringUntil('\n');
-    message.trim();
-
-    if (message.length() == 0) {
-        return;
-    }
-
-    LOG_DEBUG("Serial RX: %s", message.c_str());
-    processMessage(message);
 }
 
 void SerialProtocol::processMessage(const String& message) {
     if (message.startsWith("LOG:")) {
         handleLogEntry(message.substring(4));
-    } else if (message.startsWith("FAULT:")) {
-        handleFaultEntry(message.substring(6));
+    } else if (message.startsWith("FAULT_SET:")) {
+        handleFaultSet(message.substring(10));
+    } else if (message.startsWith("FAULT_CLEAR:")) {
+        handleFaultClear(message.substring(12));
     } else if (message.startsWith("SCHEDULE_HASH:")) {
         handleScheduleHash(message.substring(14));
     } else if (message.startsWith("SCHEDULE_STATUS:END")) {
@@ -185,6 +217,8 @@ void SerialProtocol::processMessage(const String& message) {
         handleScheduleStatusHeader(message.substring(16));
     } else if (message.startsWith("SCHEDULE_ITEM:")) {
         handleScheduleItem(message.substring(14));
+    } else if (message.startsWith("SCHEDULE_EXECUTED:")) {
+        handleScheduleExecuted(message.substring(18));
     } else if (message.startsWith("{") && message.endsWith("}")) {
         handleStatusUpdate(message);
     } else {
@@ -205,11 +239,20 @@ void SerialProtocol::handleStatusUpdate(const String& statusJson) {
     FirebaseJson json;
     json.setJsonData(sanitized);
 
+    // The Feeder ESP reports its own version as "firmwareVersion" — rename
+    // it to feederFirmwareVersion so it doesn't collide with wifiFirmwareVersion below.
+    FirebaseJsonData versionData;
+    if (json.get(versionData, "firmwareVersion")) {
+        json.set("feederFirmwareVersion", versionData.stringValue);
+        json.remove("firmwareVersion");
+    }
+
     char timestamp[25];
     deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
     json.set("isOnline", true);
     json.set("wifiSignal", WiFi.RSSI());
     json.set("lastSeen", timestamp);
+    json.set("wifiFirmwareVersion", FIRMWARE_VERSION);
 
     String fullJson;
     json.toString(fullJson);
@@ -230,13 +273,38 @@ void SerialProtocol::handleLogEntry(const String& logJson) {
     }
 }
 
-void SerialProtocol::handleFaultEntry(const String& faultJson) {
+void SerialProtocol::handleFaultSet(const String& payload) {
+    // payload = "<key>:<json>" — split on the FIRST colon since the json
+    // body itself contains colons.
+    int colon = payload.indexOf(':');
+    if (colon <= 0) {
+        LOG_WARN("Malformed FAULT_SET (no key/json separator): %s", payload.c_str());
+        return;
+    }
+
+    String key = payload.substring(0, colon);
+    String faultJson = payload.substring(colon + 1);
     String sanitized = sanitizeJson(faultJson);
-    LOG_WARN("Fault from Feeding ESP");
+    LOG_WARN("Fault SET from Feeding ESP: %s", key.c_str());
 
     // Timestamp is already embedded by the feeder ESP — do not overwrite it.
-    if (!enqueueFirebaseWrite(QueueItemType::FAULT, sanitized.c_str())) {
-        LOG_WARN("Failed to queue fault entry");
+    if (!enqueueFirebaseWrite(QueueItemType::FAULT_SET, sanitized.c_str(), key.c_str())) {
+        LOG_WARN("Failed to queue fault set");
+    }
+}
+
+void SerialProtocol::handleFaultClear(const String& key) {
+    String trimmedKey = key;
+    trimmedKey.trim();
+    if (trimmedKey.length() == 0) {
+        LOG_WARN("Malformed FAULT_CLEAR (empty key)");
+        return;
+    }
+
+    LOG_INFO("Fault CLEAR from Feeding ESP: %s", trimmedKey.c_str());
+
+    if (!enqueueFirebaseWrite(QueueItemType::FAULT_DELETE, "", trimmedKey.c_str())) {
+        LOG_WARN("Failed to queue fault clear");
     }
 }
 
@@ -254,6 +322,21 @@ void SerialProtocol::handleScheduleHash(const String& hash) {
             sendScheduleSyncStatus(false, "Hash mismatch - sync failed");
         }
         scheduleSyncState_.waitingForConfirmation = false;
+    }
+}
+
+void SerialProtocol::handleScheduleExecuted(const String& scheduleId) {
+    String trimmedId = scheduleId;
+    trimmedId.trim();
+    if (trimmedId.length() == 0) {
+        LOG_WARN("Malformed SCHEDULE_EXECUTED (empty scheduleId)");
+        return;
+    }
+
+    LOG_INFO("Schedule executed: %s", trimmedId.c_str());
+
+    if (!enqueueFirebaseWrite(QueueItemType::SCHEDULE_EXECUTED, "", trimmedId.c_str())) {
+        LOG_WARN("Failed to queue schedule executed update");
     }
 }
 

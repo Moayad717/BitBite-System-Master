@@ -15,6 +15,7 @@
 //   OTA_START:<total_bytes>:<crc32>        Begin OTA session
 //   OTA_CHUNK:<seq>:<len>:<hexdata>        Send a firmware chunk
 //   OTA_END                                All chunks sent
+//   OTA_ABORT                              Sender gave up — return to normal now
 //
 //   Feeder ESP  →  WiFi ESP
 //   ─────────────────────────────────────────────────────────────
@@ -55,6 +56,10 @@ private:
 
     // Reads a newline-terminated response from Serial2.
     bool waitForLine(String& out, uint32_t timeoutMs);
+
+    // Tells the Feeder ESP to give up and return to normal mode immediately,
+    // instead of waiting out its own idle timeout after we give up here.
+    void sendAbort();
 
     // Converts bytes to uppercase hex string (no separator)
     void bytesToHex(const uint8_t* data, size_t len, String& out);

@@ -1,5 +1,6 @@
 #include "DualCoreManager.h"
 #include "LogManager.h"
+#include "../utils/Watchdog.h"
 #include "../connectivity/WiFiConnectionManager.h"
 #include "../connectivity/FirebaseManager.h"
 #include "../messaging/StreamManager.h"
@@ -45,7 +46,20 @@ bool enqueueSerial2Cmd(const char* cmd) {
     return true;
 }
 
-bool enqueueFirebaseWrite(QueueItemType type, const char* jsonData) {
+static const char* queueItemTypeName(QueueItemType type) {
+    switch (type) {
+        case QueueItemType::STATUS:          return "STATUS";
+        case QueueItemType::LOG:             return "LOG";
+        case QueueItemType::FAULT_SET:       return "FAULT_SET";
+        case QueueItemType::FAULT_DELETE:    return "FAULT_DELETE";
+        case QueueItemType::SYNC_STATUS:     return "SYNC_STATUS";
+        case QueueItemType::SCHEDULE_STATUS: return "SCHEDULE_STATUS";
+        case QueueItemType::SCHEDULE_EXECUTED: return "SCHEDULE_EXECUTED";
+        default:                             return "UNKNOWN";
+    }
+}
+
+bool enqueueFirebaseWrite(QueueItemType type, const char* jsonData, const char* key) {
     if (!firebaseQueue || !jsonData) {
         return false;
     }
@@ -59,12 +73,31 @@ bool enqueueFirebaseWrite(QueueItemType type, const char* jsonData) {
     item.type = type;
     strncpy(item.jsonData, jsonData, sizeof(item.jsonData) - 1);
     item.jsonData[sizeof(item.jsonData) - 1] = '\0';
+    item.key[0] = '\0';
+    if (key) {
+        strncpy(item.key, key, sizeof(item.key) - 1);
+        item.key[sizeof(item.key) - 1] = '\0';
+    }
 
-    // Non-blocking send — drop if queue is full
+    // Non-blocking send — if the queue is full, LOG/FAULT_SET/FAULT_DELETE
+    // fall back to the offline queue (mirrors processFirebaseQueue()'s
+    // existing fallback for items that fail *after* dequeuing). STATUS and
+    // SCHEDULE_EXECUTED are left to drop silently — they're either stale by
+    // the time connectivity returns or resync naturally.
     if (xQueueSend(firebaseQueue, &item, 0) != pdTRUE) {
-        LOG_WARN("Firebase queue full, dropping %s item",
-                 type == QueueItemType::STATUS ? "STATUS" :
-                 type == QueueItemType::LOG ? "LOG" : "FAULT");
+        if (type == QueueItemType::LOG || type == QueueItemType::FAULT_SET ||
+            type == QueueItemType::FAULT_DELETE) {
+            OfflineEntryType offlineType =
+                type == QueueItemType::LOG ? OfflineEntryType::LOG :
+                type == QueueItemType::FAULT_SET ? OfflineEntryType::FAULT_SET :
+                                                    OfflineEntryType::FAULT_DELETE;
+            if (offlineQueue.enqueue(offlineType, item.jsonData, item.key)) {
+                LOG_WARN("Firebase queue full, %s item routed to offline storage", queueItemTypeName(type));
+                return true;
+            }
+        }
+
+        LOG_WARN("Firebase queue full, dropping %s item", queueItemTypeName(type));
         return false;
     }
 
@@ -106,41 +139,63 @@ static void processFirebaseQueue() {
                 if (success) {
                     LOG_INFO("Queue: Schedule status sent to Firebase");
                 }
-            } else {
-                // LOG and FAULT use pushJSON to their respective paths
+            } else if (item.type == QueueItemType::LOG) {
                 char path[128];
-                if (item.type == QueueItemType::LOG) {
-                    snprintf(path, sizeof(path), "%s/logs", deviceManager.getDevicePath());
-                } else {
-                    snprintf(path, sizeof(path), "%s/faults", deviceManager.getDevicePath());
-                }
-
+                snprintf(path, sizeof(path), "%s/logs", deviceManager.getDevicePath());
                 success = firebaseManager.pushJSON(path, &json);
                 if (success) {
-                    LOG_DEBUG("Queue: %s sent to Firebase",
-                             item.type == QueueItemType::LOG ? "Log" : "Fault");
+                    LOG_DEBUG("Queue: Log sent to Firebase");
+                }
+            } else if (item.type == QueueItemType::FAULT_SET) {
+                char path[160];
+                snprintf(path, sizeof(path), "%s/%s", deviceManager.getFaultsPath(), item.key);
+                success = firebaseManager.setJSON(path, &json);
+                if (success) {
+                    LOG_DEBUG("Queue: Fault set (%s) sent to Firebase", item.key);
+                }
+            } else if (item.type == QueueItemType::FAULT_DELETE) {
+                char path[160];
+                snprintf(path, sizeof(path), "%s/%s", deviceManager.getFaultsPath(), item.key);
+                success = firebaseManager.deleteNode(path);
+                if (success) {
+                    LOG_DEBUG("Queue: Fault clear (%s) sent to Firebase", item.key);
+                }
+            } else if (item.type == QueueItemType::SCHEDULE_EXECUTED) {
+                // Leaf boolean write — not a JSON object, so this bypasses
+                // the `json` built above (FirebaseJson is for object/array
+                // literals; a dedicated setBool() is used instead).
+                char path[160];
+                snprintf(path, sizeof(path), "%s/schedules/%s/executedToday", deviceManager.getDevicePath(), item.key);
+                success = firebaseManager.setBool(path, true);
+                if (success) {
+                    LOG_DEBUG("Queue: Schedule executed (%s) sent to Firebase", item.key);
                 }
             }
 
             if (!success) {
                 LOG_ERROR("Queue: Firebase write failed: %s", firebaseManager.getLastError().c_str());
                 // Only persist logs and faults to offline storage — not operational status items
-                if (item.type == QueueItemType::LOG || item.type == QueueItemType::FAULT) {
-                    OfflineEntryType offlineType = (item.type == QueueItemType::LOG)
-                        ? OfflineEntryType::LOG : OfflineEntryType::FAULT;
-                    offlineQueue.enqueue(offlineType, item.jsonData);
+                if (item.type == QueueItemType::LOG || item.type == QueueItemType::FAULT_SET ||
+                    item.type == QueueItemType::FAULT_DELETE) {
+                    OfflineEntryType offlineType =
+                        item.type == QueueItemType::LOG ? OfflineEntryType::LOG :
+                        item.type == QueueItemType::FAULT_SET ? OfflineEntryType::FAULT_SET :
+                                                                 OfflineEntryType::FAULT_DELETE;
+                    offlineQueue.enqueue(offlineType, item.jsonData, item.key);
                 }
             }
 
             json.clear();
         } else {
             // Firebase not ready — queue logs/faults to offline storage
-            if (item.type != QueueItemType::STATUS) {
-                OfflineEntryType offlineType = (item.type == QueueItemType::LOG)
-                    ? OfflineEntryType::LOG : OfflineEntryType::FAULT;
-                offlineQueue.enqueue(offlineType, item.jsonData);
-                LOG_DEBUG("Queue: %s queued to offline storage",
-                         item.type == QueueItemType::LOG ? "Log" : "Fault");
+            if (item.type == QueueItemType::LOG || item.type == QueueItemType::FAULT_SET ||
+                item.type == QueueItemType::FAULT_DELETE) {
+                OfflineEntryType offlineType =
+                    item.type == QueueItemType::LOG ? OfflineEntryType::LOG :
+                    item.type == QueueItemType::FAULT_SET ? OfflineEntryType::FAULT_SET :
+                                                             OfflineEntryType::FAULT_DELETE;
+                offlineQueue.enqueue(offlineType, item.jsonData, item.key);
+                LOG_DEBUG("Queue: %s queued to offline storage", queueItemTypeName(item.type));
             }
         }
 
@@ -179,6 +234,10 @@ static void networkTask(void* param) {
         if (!serialOTAForwarder.isForwarding()) {
             otaManager.tick();
         }
+
+        // Prove this task is still making progress — checked by
+        // Watchdog::checkTaskHealth() from Core 1's loop().
+        Watchdog::taskHeartbeat("networkTask");
 
         // Yield to other Core 0 tasks (WiFi stack, etc.)
         vTaskDelay(pdMS_TO_TICKS(50));

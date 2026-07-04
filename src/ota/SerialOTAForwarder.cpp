@@ -57,6 +57,7 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
     String response;
     if (!waitForLine(response, READY_TIMEOUT_MS) || response != "OTA_READY") {
         LOG_ERROR("[%s] No OTA_READY from feeder (got: '%s')", TAG, response.c_str());
+        sendAbort();
         f.close();
         forwarding_ = false;
         return false;
@@ -77,6 +78,7 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
         if (len != expected) {
             LOG_ERROR("[%s] SPIFFS read failed at chunk %u: got %u/%u bytes (file truncated?)",
                       TAG, seq, len, expected);
+            sendAbort();
             f.close();
             forwarding_ = false;
             return false;
@@ -92,6 +94,7 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
 
         if (!ok) {
             LOG_ERROR("[%s] Chunk %u failed after %d retries — aborting OTA", TAG, seq, MAX_RETRIES);
+            sendAbort();
             f.close();
             forwarding_ = false;
             return false;
@@ -116,6 +119,7 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
 
     if (!waitForLine(response, DONE_TIMEOUT_MS)) {
         LOG_ERROR("[%s] Timeout waiting for feeder OTA result", TAG);
+        sendAbort();
         forwarding_ = false;
         return false;
     }
@@ -181,11 +185,24 @@ bool SerialOTAForwarder::waitForLine(String& out, uint32_t timeoutMs) {
             }
             if (c != '\r') out += c;
         } else {
+            // DONE_TIMEOUT_MS equals the hardware watchdog timeout, and this
+            // loop is the only code running on Core 1 while it spins — feed
+            // here or a slow-but-successful final ACK can still cost us a
+            // watchdog reset right as the transfer was about to finish.
+            Watchdog::feed();
             yield();  // Let FreeRTOS scheduler breathe
         }
     }
 
     return false;
+}
+
+// ============================================================================
+// ABORT
+// ============================================================================
+
+void SerialOTAForwarder::sendAbort() {
+    Serial2.println("OTA_ABORT");
 }
 
 // ============================================================================

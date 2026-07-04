@@ -37,7 +37,16 @@ void OfflineQueueManager::begin(FirebaseManager* fbManager, DeviceManager* devMa
 // QUEUE OPERATIONS
 // ============================================================================
 
-bool OfflineQueueManager::enqueue(OfflineEntryType type, const String& jsonData) {
+static const char* offlineEntryTypeName(OfflineEntryType type) {
+    switch (type) {
+        case OfflineEntryType::LOG:          return "LOG";
+        case OfflineEntryType::FAULT_SET:    return "FAULT_SET";
+        case OfflineEntryType::FAULT_DELETE: return "FAULT_DELETE";
+        default:                             return "UNKNOWN";
+    }
+}
+
+bool OfflineQueueManager::enqueue(OfflineEntryType type, const String& jsonData, const char* key) {
     if (!SPIFFSHelper::isReady()) {
         LOG_WARN("SPIFFS not ready - cannot queue offline entry");
         return false;
@@ -50,19 +59,20 @@ bool OfflineQueueManager::enqueue(OfflineEntryType type, const String& jsonData)
     }
 
     // Build and append entry
-    String entry = buildQueueEntry(type, jsonData);
+    String entry = buildQueueEntry(type, jsonData, key ? String(key) : String(""));
     if (entry.length() > MAX_ENTRY_SIZE) {
         LOG_WARN("Entry too large (%u bytes), dropping to avoid corrupt JSON", entry.length());
         return false;
     }
 
     if (SPIFFSHelper::appendLine(OFFLINE_QUEUE_FILE, entry)) {
-        LOG_DEBUG("Queued offline %s entry", type == OfflineEntryType::LOG ? "LOG" : "FAULT");
+        LOG_DEBUG("Queued offline %s entry", offlineEntryTypeName(type));
         enforceMaxEntries();
         return true;
     }
 
     LOG_ERROR("Failed to queue offline entry");
+    droppedCount_++;
     return false;
 }
 
@@ -99,16 +109,17 @@ bool OfflineQueueManager::flushOne() {
     // Parse entry
     OfflineEntryType type;
     String jsonData;
-    if (!parseQueueEntry(line, type, jsonData)) {
+    String key;
+    if (!parseQueueEntry(line, type, jsonData, key)) {
         LOG_WARN("Invalid queue entry, removing");
         SPIFFSHelper::removeFirstLine(OFFLINE_QUEUE_FILE);
         return false;
     }
 
     // Attempt to send
-    if (sendToFirebase(type, jsonData)) {
+    if (sendToFirebase(type, jsonData, key)) {
         SPIFFSHelper::removeFirstLine(OFFLINE_QUEUE_FILE);
-        LOG_INFO("Flushed offline %s entry", type == OfflineEntryType::LOG ? "LOG" : "FAULT");
+        LOG_INFO("Flushed offline %s entry", offlineEntryTypeName(type));
         return true;
     }
 
@@ -127,18 +138,25 @@ void OfflineQueueManager::clear() {
 // HELPERS
 // ============================================================================
 
-String OfflineQueueManager::buildQueueEntry(OfflineEntryType type, const String& jsonData) {
-    // Format: {"t":0,"d":{...}}
+String OfflineQueueManager::buildQueueEntry(OfflineEntryType type, const String& jsonData, const String& key) {
+    // Format: {"t":0,"k":"<key>","d":{...}}
+    // "k" is only meaningful for FAULT_SET/FAULT_DELETE; "d" defaults to {}
+    // for deletes (which carry no JSON payload) so the line stays valid JSON.
     String entry = "{\"t\":";
     entry += String((uint8_t)type);
-    entry += ",\"d\":";
-    entry += jsonData;
+    entry += ",\"k\":\"";
+    entry += key;
+    entry += "\",\"d\":";
+    entry += (jsonData.length() > 0) ? jsonData : String("{}");
     entry += "}";
     return entry;
 }
 
-bool OfflineQueueManager::parseQueueEntry(const String& line, OfflineEntryType& type, String& jsonData) {
-    // Parse: {"t":0,"d":{...}}
+bool OfflineQueueManager::parseQueueEntry(const String& line, OfflineEntryType& type, String& jsonData, String& key) {
+    // Parse: {"t":0,"k":"<key>","d":{...}}
+    // "k" is looked up independently and defaults to "" if absent, so a
+    // queue entry written by a pre-upgrade firmware (no "k" field) still
+    // parses instead of getting dropped as invalid.
     int typeStart = line.indexOf("\"t\":");
     int dataStart = line.indexOf("\"d\":");
 
@@ -146,38 +164,65 @@ bool OfflineQueueManager::parseQueueEntry(const String& line, OfflineEntryType& 
         return false;
     }
 
-    // Extract type
-    int typeValue = line.substring(typeStart + 4, dataStart - 1).toInt();
+    // Extract type — bounded by the next comma, not by dataStart, since "k"
+    // may sit between "t" and "d".
+    int typeValueEnd = line.indexOf(',', typeStart + 4);
+    if (typeValueEnd == -1 || typeValueEnd > dataStart) {
+        return false;
+    }
+    int typeValue = line.substring(typeStart + 4, typeValueEnd).toInt();
     type = static_cast<OfflineEntryType>(typeValue);
 
+    // Extract key (optional)
+    int keyStart = line.indexOf("\"k\":\"");
+    if (keyStart != -1 && keyStart < dataStart) {
+        int keyValueStart = keyStart + 5;  // length of "k":"
+        int keyValueEnd = line.indexOf('"', keyValueStart);
+        key = (keyValueEnd != -1) ? line.substring(keyValueStart, keyValueEnd) : "";
+    } else {
+        key = "";
+    }
+
     // Extract data (everything after "d": until last })
+    int dataValueStart = dataStart + 4;
     int dataEnd = line.lastIndexOf('}');
-    if (dataEnd <= dataStart) {
+    if (dataEnd <= dataValueStart) {
         return false;
     }
 
-    jsonData = line.substring(dataStart + 4, dataEnd);
-    return jsonData.length() > 0;
+    jsonData = line.substring(dataValueStart, dataEnd);
+    return true;
 }
 
-bool OfflineQueueManager::sendToFirebase(OfflineEntryType type, const String& jsonData) {
+bool OfflineQueueManager::sendToFirebase(OfflineEntryType type, const String& jsonData, const String& key) {
     if (!firebaseManager_ || !deviceManager_) {
         return false;
     }
 
-    FirebaseJson json;
-    json.setJsonData(jsonData);
-
-    char path[128];
     if (type == OfflineEntryType::LOG) {
+        FirebaseJson json;
+        json.setJsonData(jsonData);
+        char path[128];
         snprintf(path, sizeof(path), "%s/logs", deviceManager_->getDevicePath());
-    } else {
-        snprintf(path, sizeof(path), "%s/faults", deviceManager_->getDevicePath());
+        bool success = firebaseManager_->pushJSON(path, &json);
+        json.clear();
+        return success;
     }
 
-    bool success = firebaseManager_->pushJSON(path, &json);
-    json.clear();
-    return success;
+    // FAULT_SET / FAULT_DELETE — fixed key under the faults path
+    char path[160];
+    snprintf(path, sizeof(path), "%s/%s", deviceManager_->getFaultsPath(), key.c_str());
+
+    if (type == OfflineEntryType::FAULT_SET) {
+        FirebaseJson json;
+        json.setJsonData(jsonData);
+        bool success = firebaseManager_->setJSON(path, &json);
+        json.clear();
+        return success;
+    }
+
+    // FAULT_DELETE — no payload
+    return firebaseManager_->deleteNode(path);
 }
 
 void OfflineQueueManager::enforceMaxEntries() {

@@ -41,6 +41,7 @@ public:
     bool getString(const char* path, String& outValue);
     bool deleteNode(const char* path);
     bool getShallowData(const char* path);
+    bool setBool(const char* path, bool value);
 
     // Stream operations
     bool beginStream(const char* path,
@@ -78,6 +79,5 @@ private:
     StreamInactiveCallback streamInactiveCallback_;
 
     // Connection helpers
-    bool checkInternetConnection();
     void handleAuthStateChange(bool wasReady, bool isReady);
 };

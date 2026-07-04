@@ -12,7 +12,8 @@ class DeviceManager;
 
 enum class OfflineEntryType : uint8_t {
     LOG = 0,
-    FAULT = 1
+    FAULT_SET = 1,
+    FAULT_DELETE = 2
 };
 
 // ============================================================================
@@ -28,8 +29,9 @@ public:
     // Initialize with dependencies
     void begin(FirebaseManager* fbManager, DeviceManager* devManager);
 
-    // Queue operations
-    bool enqueue(OfflineEntryType type, const String& jsonData);
+    // Queue operations. `key` is only meaningful for FAULT_SET/FAULT_DELETE
+    // (the fixed RTDB child key, e.g. "DHT_ERROR") and ignored for LOG.
+    bool enqueue(OfflineEntryType type, const String& jsonData, const char* key = nullptr);
     bool hasEntries() const;
     size_t getEntryCount() const;
 
@@ -51,8 +53,8 @@ private:
     size_t droppedCount_;
 
     // Helpers
-    String buildQueueEntry(OfflineEntryType type, const String& jsonData);
-    bool parseQueueEntry(const String& line, OfflineEntryType& type, String& jsonData);
-    bool sendToFirebase(OfflineEntryType type, const String& jsonData);
+    String buildQueueEntry(OfflineEntryType type, const String& jsonData, const String& key);
+    bool parseQueueEntry(const String& line, OfflineEntryType& type, String& jsonData, String& key);
+    bool sendToFirebase(OfflineEntryType type, const String& jsonData, const String& key);
     void enforceMaxEntries();
 };

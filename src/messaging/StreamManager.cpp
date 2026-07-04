@@ -19,7 +19,9 @@ StreamManager::StreamManager()
       streamStarted_(false),
       lastDeleteTime_(0),
       lastRestartAttempt_(0),
-      deleteQueueCount_(0),
+      deleteQueue_(nullptr),
+      deleteTrackingCount_(0),
+      deleteTrackingMutex_(nullptr),
       pendingCmdQueue_(nullptr) {
 
     instance_ = this;
@@ -36,6 +38,16 @@ void StreamManager::begin(FirebaseManager* fbManager, DeviceManager* devManager)
     pendingCmdQueue_ = xQueueCreate(PENDING_CMD_QUEUE_SIZE, sizeof(PendingCommand));
     if (!pendingCmdQueue_) {
         LOG_ERROR("Failed to create pending command queue!");
+    }
+
+    deleteQueue_ = xQueueCreate(DELETE_QUEUE_SIZE, sizeof(DeleteQueueItem));
+    if (!deleteQueue_) {
+        LOG_ERROR("Failed to create delete queue!");
+    }
+
+    deleteTrackingMutex_ = xSemaphoreCreateMutex();
+    if (!deleteTrackingMutex_) {
+        LOG_ERROR("Failed to create delete tracking mutex!");
     }
 
     LOG_INFO("StreamManager initialized");
@@ -212,19 +224,26 @@ void StreamManager::processSingleCommand(FirebaseJson& json, const String& comma
 
         // Push to pending queue — the callback is dispatched from tick() (networkTask
         // context) to avoid calling blocking Firebase ops inside the stream callback.
+        bool dispatched = false;
         if (pendingCmdQueue_) {
             PendingCommand cmd;
             strncpy(cmd.type, commandType.c_str(), sizeof(cmd.type) - 1);
             cmd.type[sizeof(cmd.type) - 1] = '\0';
             strncpy(cmd.id, commandId.c_str(), sizeof(cmd.id) - 1);
             cmd.id[sizeof(cmd.id) - 1] = '\0';
-            if (xQueueSend(pendingCmdQueue_, &cmd, 0) != pdTRUE) {
+            if (xQueueSend(pendingCmdQueue_, &cmd, 0) == pdTRUE) {
+                dispatched = true;
+            } else {
                 LOG_WARN("Pending command queue full, dropping: %s", commandType.c_str());
             }
         }
 
-        // Queue deletion
-        queueCommandDeletion(commandId.c_str());
+        // Only delete from Firebase once dispatch actually succeeded — if the
+        // pending queue was full, leave the command in place so it's picked
+        // up on the next pass instead of being silently lost.
+        if (dispatched) {
+            queueCommandDeletion(commandId.c_str());
+        }
     } else {
         LOG_WARN("Command missing 'type' field");
     }
@@ -263,20 +282,26 @@ void StreamManager::processMultipleCommands(FirebaseJson& json) {
             LOG_INFO("  [%d/%d] Command: %s (ID: %s)", i+1, count, commandType.c_str(), commandId.c_str());
 
             // Push to pending queue (dispatched from tick(), not from callback context)
+            bool dispatched = false;
             if (pendingCmdQueue_) {
                 PendingCommand cmd;
                 strncpy(cmd.type, commandType.c_str(), sizeof(cmd.type) - 1);
                 cmd.type[sizeof(cmd.type) - 1] = '\0';
                 strncpy(cmd.id, commandId.c_str(), sizeof(cmd.id) - 1);
                 cmd.id[sizeof(cmd.id) - 1] = '\0';
-                if (xQueueSend(pendingCmdQueue_, &cmd, 0) != pdTRUE) {
+                if (xQueueSend(pendingCmdQueue_, &cmd, 0) == pdTRUE) {
+                    dispatched = true;
+                } else {
                     LOG_WARN("  Pending command queue full, dropping: %s", commandType.c_str());
                 }
             }
 
-            // Queue deletion
-            queueCommandDeletion(commandId.c_str());
-            processedCount++;
+            // Only delete from Firebase once dispatch actually succeeded —
+            // otherwise leave it in place so it's retried next pass.
+            if (dispatched) {
+                queueCommandDeletion(commandId.c_str());
+                processedCount++;
+            }
         }
 
         cmdJson.clear();
@@ -291,15 +316,28 @@ void StreamManager::processMultipleCommands(FirebaseJson& json) {
 // ============================================================================
 
 void StreamManager::queueCommandDeletion(const char* commandId) {
-    if (deleteQueueCount_ >= DELETE_QUEUE_SIZE) {
-        LOG_WARN("Delete queue full - command will remain!");
+    char path[120];
+    snprintf(path, sizeof(path), "%s/%s", deviceManager_->getCommandsPath(), commandId);
+
+    // Track BEFORE sending so isCommandInDeleteQueue() can never miss an
+    // in-flight command due to a race between these two steps.
+    addToDeleteTracking(path);
+
+    if (!deleteQueue_) {
+        removeFromDeleteTracking(path);
         return;
     }
 
-    // Build full path
-    snprintf(deleteQueue_[deleteQueueCount_], 120, "%s/%s",
-             deviceManager_->getCommandsPath(), commandId);
-    deleteQueueCount_++;
+    DeleteQueueItem item;
+    strncpy(item.path, path, sizeof(item.path) - 1);
+    item.path[sizeof(item.path) - 1] = '\0';
+
+    if (xQueueSend(deleteQueue_, &item, 0) != pdTRUE) {
+        LOG_WARN("Delete queue full - command will remain: %s", commandId);
+        // Roll back tracking so this command isn't falsely blocked forever
+        removeFromDeleteTracking(path);
+        return;
+    }
 
     LOG_DEBUG("Command queued for deletion: %s", commandId);
 }
@@ -312,43 +350,77 @@ void StreamManager::processDeleteQueue() {
         return;
     }
 
-    if (deleteQueueCount_ == 0 || !firebaseManager_->isReady()) {
+    if (!deleteQueue_ || !firebaseManager_->isReady()) {
         return;
     }
 
     // Process one deletion per iteration
-    char deletePath[120];
-    strncpy(deletePath, deleteQueue_[0], 119);
-    deletePath[119] = '\0';
+    DeleteQueueItem item;
+    if (xQueueReceive(deleteQueue_, &item, 0) != pdTRUE) {
+        return;  // nothing queued
+    }
 
-    LOG_DEBUG("Deleting processed command: %s", deletePath);
+    LOG_DEBUG("Deleting processed command: %s", item.path);
 
-    if (firebaseManager_->deleteNode(deletePath)) {
+    if (firebaseManager_->deleteNode(item.path)) {
         LOG_DEBUG("Command deleted successfully");
     } else {
         LOG_WARN("Command deletion failed: %s", firebaseManager_->getLastError().c_str());
     }
 
-    // Shift queue
-    for (int i = 0; i < deleteQueueCount_ - 1; i++) {
-        strcpy(deleteQueue_[i], deleteQueue_[i + 1]);
-    }
-    deleteQueueCount_--;
+    removeFromDeleteTracking(item.path);
 
     lastDeleteTime_ = currentMillis;
 }
 
 bool StreamManager::isCommandInDeleteQueue(const char* commandId) const {
-    // Build full path
     char fullPath[120];
-    snprintf(fullPath, 120, "%s/%s", deviceManager_->getCommandsPath(), commandId);
+    snprintf(fullPath, sizeof(fullPath), "%s/%s", deviceManager_->getCommandsPath(), commandId);
 
-    // Check if already queued
-    for (int i = 0; i < deleteQueueCount_; i++) {
-        if (strcmp(deleteQueue_[i], fullPath) == 0) {
-            return true;
+    bool found = false;
+    if (deleteTrackingMutex_ && xSemaphoreTake(deleteTrackingMutex_, portMAX_DELAY) == pdTRUE) {
+        for (int i = 0; i < deleteTrackingCount_; i++) {
+            if (strcmp(deleteTracking_[i], fullPath) == 0) {
+                found = true;
+                break;
+            }
         }
+        xSemaphoreGive(deleteTrackingMutex_);
     }
 
-    return false;
+    return found;
+}
+
+void StreamManager::addToDeleteTracking(const char* path) {
+    if (!deleteTrackingMutex_) {
+        return;
+    }
+    if (xSemaphoreTake(deleteTrackingMutex_, portMAX_DELAY) == pdTRUE) {
+        if (deleteTrackingCount_ < DELETE_QUEUE_SIZE) {
+            strncpy(deleteTracking_[deleteTrackingCount_], path, sizeof(deleteTracking_[0]) - 1);
+            deleteTracking_[deleteTrackingCount_][sizeof(deleteTracking_[0]) - 1] = '\0';
+            deleteTrackingCount_++;
+        } else {
+            LOG_WARN("Delete tracking set full - duplicate detection may miss: %s", path);
+        }
+        xSemaphoreGive(deleteTrackingMutex_);
+    }
+}
+
+void StreamManager::removeFromDeleteTracking(const char* path) {
+    if (!deleteTrackingMutex_) {
+        return;
+    }
+    if (xSemaphoreTake(deleteTrackingMutex_, portMAX_DELAY) == pdTRUE) {
+        for (int i = 0; i < deleteTrackingCount_; i++) {
+            if (strcmp(deleteTracking_[i], path) == 0) {
+                for (int j = i; j < deleteTrackingCount_ - 1; j++) {
+                    strcpy(deleteTracking_[j], deleteTracking_[j + 1]);
+                }
+                deleteTrackingCount_--;
+                break;
+            }
+        }
+        xSemaphoreGive(deleteTrackingMutex_);
+    }
 }

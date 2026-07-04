@@ -134,6 +134,11 @@ void Watchdog::checkTaskHealth() {
                          timeSince > task.maxPeriodMs ? "[FROZEN]" : "[OK]");
         }
         Serial.println("===================\n");
+
+        // A frozen task can't be recovered in place — reboot so the device
+        // reconnects to WiFi, re-authenticates with Firebase, and resumes
+        // normal operation instead of staying stuck indefinitely.
+        ESP.restart();
     }
 }
 
