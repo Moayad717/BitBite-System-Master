@@ -200,6 +200,12 @@ static void processFirebaseQueue() {
         }
 
         processed++;
+
+        // Heartbeat after EACH item, not just once when the whole batch of
+        // up to 3 finishes. A single slow Firebase call can individually
+        // approach the library's own serverResponse timeout; three of those
+        // in one pass can add up with no heartbeat opportunity in between.
+        Watchdog::taskHeartbeat("networkTask");
     }
 }
 
@@ -207,24 +213,49 @@ static void processFirebaseQueue() {
 // NETWORK TASK (Core 0)
 // ============================================================================
 
+// Traces how long each networkTask step took, and heartbeats immediately
+// after — both the software heartbeat (checkTaskHealth()) and, indirectly,
+// visibility into what was running if the hardware watchdog fires instead.
+// Threshold is generous (500ms) so normal execution stays silent; only a
+// step that's actually stalling should ever print here.
+static void traceStep(const char* name, unsigned long stepStart) {
+    unsigned long elapsed = millis() - stepStart;
+    if (elapsed >= 500) {
+        LOG_WARN("[TRACE] networkTask step '%s' took %lums", name, elapsed);
+    }
+    Watchdog::taskHeartbeat("networkTask");
+}
+
 static void networkTask(void* param) {
     LOG_INFO("Network task started on Core %d", xPortGetCoreID());
 
     for (;;) {
+        unsigned long stepStart;
+
         // WiFi maintenance (reconnection)
+        stepStart = millis();
         wifiManager.tick();
+        traceStep("wifiManager.tick", stepStart);
 
         // Firebase maintenance (reconnection)
+        stepStart = millis();
         firebaseManager.tick();
+        traceStep("firebaseManager.tick", stepStart);
 
         // Process queued Firebase writes from SerialProtocol
+        stepStart = millis();
         processFirebaseQueue();
+        traceStep("processFirebaseQueue", stepStart);
 
         // Stream command deletion queue
+        stepStart = millis();
         streamManager.tick();
+        traceStep("streamManager.tick", stepStart);
 
         // Scheduled tasks (heartbeat, time sync, offline flush)
+        stepStart = millis();
         taskScheduler.tick();
+        traceStep("taskScheduler.tick", stepStart);
 
         // OTA update check — polls GitHub every 30 min, downloads if newer.
         // Skipped while Core 1 is forwarding feeder firmware: applyWiFiFirmware()
@@ -232,12 +263,10 @@ static void networkTask(void* param) {
         // causing concurrent SPIFFS reads on Core 1 to return 0 bytes and abort
         // the feeder transfer.
         if (!serialOTAForwarder.isForwarding()) {
+            stepStart = millis();
             otaManager.tick();
+            traceStep("otaManager.tick", stepStart);
         }
-
-        // Prove this task is still making progress — checked by
-        // Watchdog::checkTaskHealth() from Core 1's loop().
-        Watchdog::taskHeartbeat("networkTask");
 
         // Yield to other Core 0 tasks (WiFi stack, etc.)
         vTaskDelay(pdMS_TO_TICKS(50));

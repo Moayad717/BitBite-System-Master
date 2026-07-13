@@ -253,6 +253,9 @@ void SerialProtocol::handleStatusUpdate(const String& statusJson) {
     json.set("wifiSignal", WiFi.RSSI());
     json.set("lastSeen", timestamp);
     json.set("wifiFirmwareVersion", FIRMWARE_VERSION);
+    json.set("wifiFreeHeap", (int)ESP.getFreeHeap());
+    json.set("wifiUptimeMs", (double)millis());
+    json.set("wifiResetReason", deviceManager_->getResetReasonString());
 
     String fullJson;
     json.toString(fullJson);

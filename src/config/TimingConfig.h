@@ -37,7 +37,13 @@
 #define OTA_STALL_TIMEOUT_MS 15000          // Abort download if no data for this long
 
 // Watchdog
-#define WATCHDOG_TIMEOUT_MS  30000          // Hardware watchdog
+// The Firebase library's SSL handshake has a hardcoded internal 60s timeout
+// (BSSL_SSL_Client.cpp, not reachable via FirebaseConfig) that occasionally
+// gets legitimately hit under bad signal - confirmed via [TRACE] logs
+// showing a single call blocking ~68s. 30s was shorter than that legitimate
+// worst case, so the hardware watchdog could fire on a slow-but-not-actually-
+// hung retry. Set comfortably above the confirmed ceiling.
+#define WATCHDOG_TIMEOUT_MS  90000          // Hardware watchdog
 
 // Core 1 loop
 #define LOOP_DELAY_MS        50             // Keeps Core 1 from busy-spinning

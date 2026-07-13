@@ -69,6 +69,9 @@ void sendStatusToFirebase() {
     json.set("isOnline", true);
     json.set("wifiSignal", wifiManager.getRSSI());
     json.set("lastSeen", timestamp);
+    json.set("wifiFreeHeap", (int)ESP.getFreeHeap());
+    json.set("wifiUptimeMs", (double)millis());
+    json.set("wifiResetReason", deviceManager.getResetReasonString());
 
     if (firebaseManager.updateJSON(deviceManager.getStatusPath(), &json)) {
         LOG_DEBUG("Heartbeat sent to Firebase");

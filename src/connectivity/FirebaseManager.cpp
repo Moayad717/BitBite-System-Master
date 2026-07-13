@@ -2,6 +2,8 @@
 #include "../core/LogManager.h"
 #include "../config/TimingConfig.h"
 #include "../config/BufferConfig.h"
+#include "../utils/Backoff.h"
+#include "../utils/Watchdog.h"
 #include "addons/TokenHelper.h"
 
 // ============================================================================
@@ -14,7 +16,11 @@ FirebaseManager::FirebaseManager()
       lastReconnectAttempt_(0),
       reconnectFailures_(0),
       wifiCheckCallback_(nullptr),
-      streamInactiveCallback_(nullptr) {
+      streamInactiveCallback_(nullptr)
+#ifdef DEV_BUILD
+      , devSimulateNotReadyUntil_(0)
+#endif
+{
 }
 
 void FirebaseManager::setWiFiCheckCallback(WiFiCheckCallback callback) {
@@ -82,8 +88,13 @@ bool FirebaseManager::begin(const char* apiKey, const char* databaseUrl) {
     config_.api_key = apiKey;
     config_.database_url = databaseUrl;
     config_.token_status_callback = tokenStatusCallback;
-    config_.timeout.serverResponse = 10000;
-    config_.timeout.socketConnection = 10000;
+    // Bounded well under WATCHDOG_TIMEOUT_MS (30s). These calls run
+    // synchronously inside networkTask with no way to yield mid-call - under
+    // bad WiFi, several stacking in one pass (queued writes, a delete, a
+    // reconnect) can otherwise hold Core 0 long enough to starve IDLE0 and
+    // trip the hardware task watchdog, regardless of our own heartbeat calls.
+    config_.timeout.serverResponse = 5000;
+    config_.timeout.socketConnection = 5000;
 
     // Restore from a saved refresh token if we have one; otherwise a fresh
     // anonymous signUp() (also calls Firebase.begin() internally).
@@ -185,6 +196,12 @@ bool FirebaseManager::reinitialize() {
 
     while (!Firebase.ready() && millis() - start < 10000) {
         delay(250);
+        // This runs inside networkTask's tick() - without feeding both
+        // watchdogs here, back-to-back 10s waits (this one + the signUp()
+        // fallback below) can total ~20s with no heartbeat, contributing to
+        // a hardware task-watchdog trip under a bad reconnect storm.
+        Watchdog::feed();
+        Watchdog::taskHeartbeat("networkTask");
     }
 
     if (Firebase.ready()) {
@@ -207,6 +224,8 @@ bool FirebaseManager::reinitialize() {
         start = millis();
         while (!Firebase.ready() && millis() - start < 10000) {
             delay(250);
+            Watchdog::feed();
+            Watchdog::taskHeartbeat("networkTask");
         }
 
         if (Firebase.ready()) {
@@ -251,16 +270,28 @@ void FirebaseManager::tick() {
 
         // Exponential backoff: FIREBASE_RECONNECT_INTERVAL * 2^failures, capped at 5 min.
         // Prevents hammering Firebase on repeated failures.
-        unsigned long backoffMs = FIREBASE_RECONNECT_INTERVAL;
-        for (uint8_t i = 0; i < reconnectFailures_ && backoffMs < 300000UL; i++) {
-            backoffMs *= 2;
-        }
-        if (backoffMs > 300000UL) backoffMs = 300000UL;
+        unsigned long backoffMs = Backoff::computeInterval(FIREBASE_RECONNECT_INTERVAL, reconnectFailures_, 300000UL);
 
-        if (now - lastReconnectAttempt_ >= backoffMs) {
+        if (Backoff::ready(now, lastReconnectAttempt_, backoffMs)) {
             lastReconnectAttempt_ = now;
             LOG_INFO("Attempting Firebase reconnection (backoff: %lus)...", backoffMs / 1000);
             reinitialize();
+
+            // reinitialize() only clears and resets the FirebaseData objects
+            // we own - it can't reach whatever internal state the underlying
+            // SSL client library is stuck in after certain failures (seen
+            // live: repeated INVALID_EMAIL/bad request on every retry,
+            // forever, on an otherwise-healthy WiFi link). Past this many
+            // consecutive failures, retrying in place clearly isn't working -
+            // reboot for genuinely fresh objects, same "can't recover in
+            // place" reasoning Watchdog::checkTaskHealth() already uses.
+            static const uint8_t MAX_RECONNECT_FAILURES = 10;
+            if (reconnectFailures_ >= MAX_RECONNECT_FAILURES) {
+                LOG_CRITICAL("Firebase reconnection failed %u times in a row - rebooting",
+                             reconnectFailures_);
+                delay(100);
+                ESP.restart();
+            }
         }
     }
 }
@@ -270,6 +301,11 @@ void FirebaseManager::tick() {
 // ============================================================================
 
 bool FirebaseManager::isReady() const {
+#ifdef DEV_BUILD
+    if (millis() < devSimulateNotReadyUntil_) {
+        return false;
+    }
+#endif
     return initialized_ && Firebase.ready();
 }
 
@@ -277,9 +313,27 @@ bool FirebaseManager::isAuthenticated() const {
     return authenticated_;
 }
 
+#ifdef DEV_BUILD
+void FirebaseManager::simulateNotReady(uint32_t durationMs) {
+    devSimulateNotReadyUntil_ = millis() + durationMs;
+    LOG_WARN("[SIM] Firebase forced not-ready for %u ms", durationMs);
+}
+#endif
+
 // ============================================================================
 // DATABASE OPERATIONS
 // ============================================================================
+
+// Logs how long a blocking RTDB call actually took, whenever it's slow
+// enough to matter (500ms+). Lets a call that's silently eating the CPU
+// budget for the hardware watchdog show up in the log by name, instead of
+// having to infer which one it was after the fact.
+static void traceCall(const char* name, unsigned long callStart) {
+    unsigned long elapsed = millis() - callStart;
+    if (elapsed >= 500) {
+        LOG_WARN("[TRACE] Firebase %s took %lums", name, elapsed);
+    }
+}
 
 bool FirebaseManager::setJSON(const char* path, FirebaseJson* json) {
     if (!json) {
@@ -291,7 +345,11 @@ bool FirebaseManager::setJSON(const char* path, FirebaseJson* json) {
         return false;
     }
 
-    if (Firebase.RTDB.setJSON(&fbdo_, path, json)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.setJSON(&fbdo_, path, json);
+    traceCall("setJSON", callStart);
+
+    if (ok) {
         fbdo_.clear();
         return true;
     }
@@ -312,7 +370,11 @@ bool FirebaseManager::updateJSON(const char* path, FirebaseJson* json) {
         return false;
     }
 
-    if (Firebase.RTDB.updateNode(&fbdo_, path, json)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.updateNode(&fbdo_, path, json);
+    traceCall("updateJSON", callStart);
+
+    if (ok) {
         fbdo_.clear();
         return true;
     }
@@ -333,7 +395,11 @@ bool FirebaseManager::pushJSON(const char* path, FirebaseJson* json) {
         return false;
     }
 
-    if (Firebase.RTDB.pushJSON(&fbdo_, path, json)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.pushJSON(&fbdo_, path, json);
+    traceCall("pushJSON", callStart);
+
+    if (ok) {
         fbdo_.clear();
         return true;
     }
@@ -354,7 +420,11 @@ bool FirebaseManager::getJSON(const char* path, FirebaseJson* json) {
         return false;
     }
 
-    if (Firebase.RTDB.getJSON(&fbdo_, path)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.getJSON(&fbdo_, path);
+    traceCall("getJSON", callStart);
+
+    if (ok) {
         *json = fbdo_.to<FirebaseJson>();
         fbdo_.clear();
         return true;
@@ -372,7 +442,11 @@ bool FirebaseManager::getString(const char* path, String& outValue) {
         return false;
     }
 
-    if (Firebase.RTDB.getString(&cmdFbdo_, path)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.getString(&cmdFbdo_, path);
+    traceCall("getString", callStart);
+
+    if (ok) {
         outValue = cmdFbdo_.stringData();
         cmdFbdo_.clear();
         return true;
@@ -390,7 +464,11 @@ bool FirebaseManager::deleteNode(const char* path) {
         return false;
     }
 
-    if (Firebase.RTDB.deleteNode(&fbdo_, path)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.deleteNode(&fbdo_, path);
+    traceCall("deleteNode", callStart);
+
+    if (ok) {
         fbdo_.clear();
         return true;
     }
@@ -407,7 +485,11 @@ bool FirebaseManager::setBool(const char* path, bool value) {
         return false;
     }
 
-    if (Firebase.RTDB.setBool(&fbdo_, path, value)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.setBool(&fbdo_, path, value);
+    traceCall("setBool", callStart);
+
+    if (ok) {
         fbdo_.clear();
         return true;
     }
@@ -424,7 +506,11 @@ bool FirebaseManager::getShallowData(const char* path) {
         return false;
     }
 
-    if (Firebase.RTDB.getShallowData(&fbdo_, path)) {
+    unsigned long callStart = millis();
+    bool ok = Firebase.RTDB.getShallowData(&fbdo_, path);
+    traceCall("getShallowData", callStart);
+
+    if (ok) {
         fbdo_.clear();
         return true;
     }

@@ -2,13 +2,22 @@
 #include "SerialProtocol.h"
 #include "../core/LogManager.h"
 #include "../core/DualCoreManager.h"
+#ifdef DEV_BUILD
+#include "../connectivity/FirebaseManager.h"
+#include "StreamManager.h"
+#endif
 
 // ============================================================================
 // CONSTRUCTOR
 // ============================================================================
 
 CommandProcessor::CommandProcessor()
-    : serialProtocol_(nullptr) {
+    : serialProtocol_(nullptr)
+#ifdef DEV_BUILD
+      , firebaseManager_(nullptr)
+      , streamManager_(nullptr)
+#endif
+{
 }
 
 // ============================================================================
@@ -18,6 +27,16 @@ CommandProcessor::CommandProcessor()
 void CommandProcessor::setSerialProtocol(SerialProtocol* serialProtocol) {
     serialProtocol_ = serialProtocol;
 }
+
+#ifdef DEV_BUILD
+void CommandProcessor::setFirebaseManager(FirebaseManager* firebaseManager) {
+    firebaseManager_ = firebaseManager;
+}
+
+void CommandProcessor::setStreamManager(StreamManager* streamManager) {
+    streamManager_ = streamManager;
+}
+#endif
 
 // ============================================================================
 // COMMAND PROCESSING
@@ -35,7 +54,15 @@ void CommandProcessor::processCommand(const String& commandType, const String& c
         handleClearFaults();
     } else if (commandType == "GET_SCHEDULE_STATUS") {
         handleGetScheduleStatus();
-    } else {
+    }
+#ifdef DEV_BUILD
+    else if (commandType == "SIMULATE_FIREBASE_DOWN") {
+        handleSimulateFirebaseDown();
+    } else if (commandType == "SIMULATE_STREAM_RESTART") {
+        handleSimulateStreamRestart();
+    }
+#endif
+    else {
         // Generic command - forward to external handler
         handleGenericCommand(commandType);
     }
@@ -79,3 +106,23 @@ void CommandProcessor::handleGenericCommand(const String& commandType) {
     LOG_INFO("Forwarding command to Feeding ESP: %s", commandType.c_str());
     enqueueSerial2Cmd(commandType.c_str());
 }
+
+#ifdef DEV_BUILD
+void CommandProcessor::handleSimulateFirebaseDown() {
+    LOG_WARN("Command: SIMULATE_FIREBASE_DOWN");
+    if (firebaseManager_) {
+        firebaseManager_->simulateNotReady(15000);
+    } else {
+        LOG_ERROR("FirebaseManager not set - cannot simulate");
+    }
+}
+
+void CommandProcessor::handleSimulateStreamRestart() {
+    LOG_WARN("Command: SIMULATE_STREAM_RESTART");
+    if (streamManager_) {
+        streamManager_->restartStream();
+    } else {
+        LOG_ERROR("StreamManager not set - cannot simulate");
+    }
+}
+#endif

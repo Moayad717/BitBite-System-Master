@@ -1,5 +1,6 @@
 #include "Watchdog.h"
 #include "../core/LogManager.h"
+#include <Preferences.h>
 
 // ============================================================================
 // STATIC MEMBERS
@@ -99,6 +100,8 @@ void Watchdog::checkTaskHealth() {
 
     unsigned long now = millis();
     bool foundFrozen = false;
+    const char* frozenName = nullptr;
+    unsigned long frozenSinceHb = 0;
 
     for (size_t i = 0; i < taskCount_; i++) {
         TaskInfo& task = tasks_[i];
@@ -114,6 +117,12 @@ void Watchdog::checkTaskHealth() {
                      task.name,
                      timeSinceHeartbeat,
                      task.maxPeriodMs);
+            if (!foundFrozen) {
+                // Only the first frozen task is persisted below - enough to
+                // diagnose the reboot without needing a live serial monitor.
+                frozenName = task.name;
+                frozenSinceHb = timeSinceHeartbeat;
+            }
             foundFrozen = true;
         }
     }
@@ -134,6 +143,18 @@ void Watchdog::checkTaskHealth() {
                          timeSince > task.maxPeriodMs ? "[FROZEN]" : "[OK]");
         }
         Serial.println("===================\n");
+
+        // Persist crash context to NVS before rebooting - the Serial dump
+        // above and the LogManager ring buffer are both RAM-only and vanish
+        // the instant ESP.restart() fires. main.cpp's setup() reads, reports,
+        // and clears this on the next boot so the cause of a watchdog restart
+        // is diagnosable without having caught it on a live serial monitor.
+        Preferences crashPrefs;
+        crashPrefs.begin("crash", false);
+        crashPrefs.putString("task", frozenName ? frozenName : "?");
+        crashPrefs.putULong("uptimeMs", now);
+        crashPrefs.putULong("sinceHbMs", frozenSinceHb);
+        crashPrefs.end();
 
         // A frozen task can't be recovered in place — reboot so the device
         // reconnects to WiFi, re-authenticates with Firebase, and resumes

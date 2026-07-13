@@ -331,6 +331,7 @@ void StreamManager::queueCommandDeletion(const char* commandId) {
     DeleteQueueItem item;
     strncpy(item.path, path, sizeof(item.path) - 1);
     item.path[sizeof(item.path) - 1] = '\0';
+    item.retries = 0;
 
     if (xQueueSend(deleteQueue_, &item, 0) != pdTRUE) {
         LOG_WARN("Delete queue full - command will remain: %s", commandId);
@@ -364,11 +365,22 @@ void StreamManager::processDeleteQueue() {
 
     if (firebaseManager_->deleteNode(item.path)) {
         LOG_DEBUG("Command deleted successfully");
+        removeFromDeleteTracking(item.path);
     } else {
-        LOG_WARN("Command deletion failed: %s", firebaseManager_->getLastError().c_str());
+        item.retries++;
+        if (item.retries < MAX_DELETE_RETRIES && xQueueSend(deleteQueue_, &item, 0) == pdTRUE) {
+            // Keep it tracked as in-flight and retry next pass — otherwise a
+            // transient failure (weak signal) leaves the command stuck in
+            // Firebase forever, and once untracked it can be re-delivered
+            // and re-executed by a later stream reconnect/bulk resync.
+            LOG_WARN("Command deletion failed (retry %d/%d): %s",
+                     item.retries, MAX_DELETE_RETRIES, firebaseManager_->getLastError().c_str());
+        } else {
+            LOG_ERROR("Command deletion failed permanently, giving up: %s (%s)",
+                       item.path, firebaseManager_->getLastError().c_str());
+            removeFromDeleteTracking(item.path);
+        }
     }
-
-    removeFromDeleteTracking(item.path);
 
     lastDeleteTime_ = currentMillis;
 }

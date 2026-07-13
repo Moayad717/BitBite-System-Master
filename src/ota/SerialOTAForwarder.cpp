@@ -102,8 +102,12 @@ bool SerialOTAForwarder::forward(const char* spiffsPath) {
 
         bytesSent += len;
 
-        // Feed watchdog — chunk loop can take minutes at low baud rates
+        // Feed watchdog — chunk loop can take minutes at low baud rates.
+        // Also runs synchronously inside networkTask's tick(), so the task
+        // heartbeat needs feeding here too or checkTaskHealth() reboots
+        // mid-transfer to the Feeder ESP.
         Watchdog::feed();
+        Watchdog::taskHeartbeat("networkTask");
 
         // Progress log at 10% intervals
         if (totalChunks > 0 && (seq + 1) % max((size_t)1, totalChunks / 10) == 0) {
@@ -189,7 +193,9 @@ bool SerialOTAForwarder::waitForLine(String& out, uint32_t timeoutMs) {
             // loop is the only code running on Core 1 while it spins — feed
             // here or a slow-but-successful final ACK can still cost us a
             // watchdog reset right as the transfer was about to finish.
+            // Also feed the task heartbeat for the same reason as above.
             Watchdog::feed();
+            Watchdog::taskHeartbeat("networkTask");
             yield();  // Let FreeRTOS scheduler breathe
         }
     }

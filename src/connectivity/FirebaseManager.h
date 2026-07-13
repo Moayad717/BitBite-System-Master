@@ -34,6 +34,13 @@ public:
     bool isReady() const;
     bool isAuthenticated() const;
 
+#ifdef DEV_BUILD
+    // Forces isReady() to return false for the given duration - lets the
+    // reconnect/backoff path be exercised on demand instead of waiting for
+    // real weak WiFi. Dev-build only.
+    void simulateNotReady(uint32_t durationMs);
+#endif
+
     // Database operations (thread-safe)
     bool setJSON(const char* path, FirebaseJson* json);
     bool updateJSON(const char* path, FirebaseJson* json);
@@ -74,6 +81,10 @@ private:
     unsigned long lastReconnectAttempt_;
     uint8_t reconnectFailures_;   // Consecutive reinit failures (drives backoff)
     String lastError_;
+
+#ifdef DEV_BUILD
+    unsigned long devSimulateNotReadyUntil_;
+#endif
 
     // Callbacks
     WiFiCheckCallback wifiCheckCallback_;

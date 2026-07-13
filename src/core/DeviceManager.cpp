@@ -1,6 +1,7 @@
 #include "DeviceManager.h"
 #include "LogManager.h"
 #include <time.h>
+#include <esp_system.h>
 
 // ============================================================================
 // CONSTRUCTOR
@@ -16,6 +17,8 @@ DeviceManager::DeviceManager() {
     schedulePath_[0] = '\0';
     historyPath_[0] = '\0';
     faultsPath_[0] = '\0';
+    strncpy(resetReasonStr_, "UNKNOWN", sizeof(resetReasonStr_) - 1);
+    resetReasonStr_[sizeof(resetReasonStr_) - 1] = '\0';
 }
 
 // ============================================================================
@@ -24,6 +27,9 @@ DeviceManager::DeviceManager() {
 
 bool DeviceManager::begin() {
     LOG_INFO("Initializing DeviceManager...");
+
+    captureResetReason();
+    LOG_INFO("Reset reason: %s", resetReasonStr_);
 
     if (!generateDeviceID()) {
         LOG_ERROR("Failed to generate device ID");
@@ -36,6 +42,27 @@ bool DeviceManager::begin() {
     LOG_DEBUG("Device path: %s", devicePath_);
 
     return true;
+}
+
+// ============================================================================
+// BOOT DIAGNOSTICS
+// ============================================================================
+
+void DeviceManager::captureResetReason() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   strncpy(resetReasonStr_, "POWERON", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_EXT:       strncpy(resetReasonStr_, "EXT_RESET", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_SW:        strncpy(resetReasonStr_, "SW_RESET", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_PANIC:     strncpy(resetReasonStr_, "PANIC", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_INT_WDT:   strncpy(resetReasonStr_, "INT_WDT", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_TASK_WDT:  strncpy(resetReasonStr_, "TASK_WDT", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_WDT:       strncpy(resetReasonStr_, "OTHER_WDT", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_DEEPSLEEP: strncpy(resetReasonStr_, "DEEPSLEEP", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_BROWNOUT:  strncpy(resetReasonStr_, "BROWNOUT", sizeof(resetReasonStr_) - 1); break;
+        case ESP_RST_SDIO:      strncpy(resetReasonStr_, "SDIO", sizeof(resetReasonStr_) - 1); break;
+        default:                strncpy(resetReasonStr_, "UNKNOWN", sizeof(resetReasonStr_) - 1); break;
+    }
+    resetReasonStr_[sizeof(resetReasonStr_) - 1] = '\0';
 }
 
 // ============================================================================

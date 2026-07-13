@@ -1,6 +1,7 @@
 #include "WiFiConnectionManager.h"
 #include "../core/LogManager.h"
 #include "../config/TimingConfig.h"
+#include "../utils/Backoff.h"
 
 // ============================================================================
 // CONSTRUCTOR
@@ -86,7 +87,7 @@ void WiFiConnectionManager::tick() {
     if (!isConnected) {
         unsigned long now = millis();
 
-        if (now - lastReconnectAttempt_ >= WIFI_RECONNECT_INTERVAL) {
+        if (Backoff::ready(now, lastReconnectAttempt_, WIFI_RECONNECT_INTERVAL)) {
             lastReconnectAttempt_ = now;
             reconnect();
         }
@@ -147,6 +148,24 @@ void WiFiConnectionManager::startConfigPortal() {
 
 void WiFiConnectionManager::handleConnection() {
     connected_ = true;
+
+    // Force max TX power (19.5dBm ceiling on this chip) and disable modem
+    // sleep. Both require STA to actually be running to take effect - calling
+    // them in begin() right after WiFi.mode(WIFI_STA) was too early (silently
+    // failed with "Neither AP or STA has been started"). Re-applied on every
+    // (re)connection since they don't reliably survive a WiFi.disconnect(true).
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    WiFi.setSleep(false);
+
+    // Keep the DHCP-assigned IP/gateway/subnet but force a fast, reliable
+    // public DNS resolver instead of the router's own. A slow/flaky router
+    // DNS resolver can hang a lookup (e.g. securetoken.googleapis.com) well
+    // past what the Firebase library's own request timeouts bound, which is
+    // a plausible contributor to networkTask holding Core 0 long enough to
+    // starve the idle task and trip the hardware watchdog. Re-applied on
+    // every (re)connection since a full WiFi.disconnect(true) clears it.
+    WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+                IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
 
     LOG_INFO("WiFi connected!");
     LOG_INFO("  SSID: %s", WiFi.SSID().c_str());

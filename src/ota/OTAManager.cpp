@@ -222,6 +222,13 @@ bool OTAManager::applyWiFiFirmware(const String& url) {
                 written += bytesRead;
                 lastDataMs = millis();
                 Watchdog::feed();
+                // This blocking loop runs synchronously inside networkTask's
+                // tick() (via otaManager.tick() -> applyWiFiFirmware()) and
+                // can take well over 30s for a ~1.3MB image. Watchdog::feed()
+                // only pets the hardware WDT — Watchdog::checkTaskHealth()'s
+                // separate software heartbeat check needs feeding here too or
+                // it reboots mid-download (exactly reproduced: froze at 20%).
+                Watchdog::taskHeartbeat("networkTask");
 
                 // Log progress every 128KB
                 if (written - lastLogAt >= 131072) {
@@ -331,6 +338,10 @@ bool OTAManager::downloadToSPIFFS(const String& url, const char* spiffsPath) {
                 totalWritten += (int)wroteBytes;
                 lastDataMs = millis();
                 Watchdog::feed();
+                // Same reasoning as applyWiFiFirmware() above - this loop is
+                // also synchronous inside networkTask and needs the software
+                // heartbeat fed, not just the hardware WDT.
+                Watchdog::taskHeartbeat("networkTask");
 
                 // Log progress every 128KB
                 if (totalWritten - lastLogAt >= 131072) {

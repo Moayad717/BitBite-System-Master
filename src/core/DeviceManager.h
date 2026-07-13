@@ -32,9 +32,14 @@ public:
     void getTimestamp(char* buffer, size_t bufferSize);
     bool hasValidTime() const;
 
+    // Boot reset reason (captured once in begin(), read-only afterward)
+    void captureResetReason();
+    const char* getResetReasonString() const { return resetReasonStr_; }
+
 private:
     // Device identification
     char deviceId_[33];
+    char resetReasonStr_[16];
 
     // Firebase paths
     char devicePath_[60];

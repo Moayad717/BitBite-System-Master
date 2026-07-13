@@ -53,7 +53,9 @@ private:
     // shared between those two tasks with no synchronization at all.
     struct DeleteQueueItem {
         char path[120];
+        uint8_t retries;
     };
+    static const uint8_t MAX_DELETE_RETRIES = 5;
     static const int DELETE_QUEUE_SIZE = 10;
     QueueHandle_t deleteQueue_;
 

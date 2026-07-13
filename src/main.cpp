@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Preferences.h>
 
 // Phase 1 Infrastructure
 #include "core/LogManager.h"
@@ -80,6 +81,30 @@ void setup() {
     // Initialize Phase 1 components
     LogManager::getInstance().begin();
     MemoryMonitor::begin();
+
+    // Report and clear any crash context left by a watchdog-triggered restart
+    // on the previous boot (written by Watchdog::checkTaskHealth() right
+    // before its ESP.restart() call) - one-time report so it isn't re-logged
+    // on every subsequent boot.
+    {
+        Preferences crashPrefs;
+        crashPrefs.begin("crash", true);
+        bool hadCrash = crashPrefs.isKey("task");
+        String frozenTask = crashPrefs.getString("task", "?");
+        unsigned long uptimeMs = crashPrefs.getULong("uptimeMs", 0);
+        unsigned long sinceHbMs = crashPrefs.getULong("sinceHbMs", 0);
+        crashPrefs.end();
+
+        if (hadCrash) {
+            LOG_CRITICAL("Previous boot ended in watchdog restart: task='%s' frozen, uptime=%lums, %lums since last heartbeat",
+                         frozenTask.c_str(), uptimeMs, sinceHbMs);
+
+            Preferences clearPrefs;
+            clearPrefs.begin("crash", false);
+            clearPrefs.clear();
+            clearPrefs.end();
+        }
+    }
 
     // Initialize SPIFFS for offline storage
     MemoryMonitor::checkpoint("Before SPIFFS");
@@ -173,6 +198,10 @@ void setup() {
 
             // Connect CommandProcessor with SerialProtocol
             commandProcessor.setSerialProtocol(&serialProtocol);
+#ifdef DEV_BUILD
+            commandProcessor.setFirebaseManager(&firebaseManager);
+            commandProcessor.setStreamManager(&streamManager);
+#endif
 
             // Initialize StreamManager
             streamManager.begin(&firebaseManager, &deviceManager);
@@ -217,9 +246,11 @@ void setup() {
     Watchdog::begin(WATCHDOG_TIMEOUT_MS);
     LOG_INFO("Watchdog started");
 
-    // networkTask loops with a 50ms vTaskDelay, so missing a heartbeat for
-    // 30s means it's genuinely stuck, not just slow.
-    Watchdog::registerTask("networkTask", 30000);
+    // A single Firebase call can legitimately take up to ~60s (the SSL
+    // library's own hardcoded handshake timeout, confirmed via [TRACE]
+    // logs) - keep this in step with WATCHDOG_TIMEOUT_MS so the software
+    // check doesn't fire before the hardware one would.
+    Watchdog::registerTask("networkTask", WATCHDOG_TIMEOUT_MS);
 
     // Start network task on Core 0 (WiFi, Firebase, tasks run there)
     startNetworkTask();
