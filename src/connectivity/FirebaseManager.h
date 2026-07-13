@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Firebase_ESP_Client.h>
+#include <Preferences.h>
 
 // ============================================================================
 // FIREBASE MANAGER
@@ -77,6 +78,21 @@ private:
     // Callbacks
     WiFiCheckCallback wifiCheckCallback_;
     StreamInactiveCallback streamInactiveCallback_;
+
+    // Anonymous auth token persistence — avoids creating a new anonymous
+    // Firebase user on every boot/reconnect. Separate NVS namespace from
+    // anything else in this codebase.
+    Preferences tokenPrefs_;
+    String loadSavedRefreshToken();
+    void saveRefreshToken(const String& token);
+    void clearSavedRefreshToken();
+
+    // Starts a Firebase auth attempt: restores from a saved refresh token if
+    // one exists, otherwise a fresh anonymous signUp(). Does not wait for
+    // Firebase.ready() - callers keep their own existing wait-loop. Returns
+    // true if a saved token was used (so the caller knows whether a signUp()
+    // fallback + retry is warranted if this attempt doesn't authenticate).
+    bool startAuth();
 
     // Connection helpers
     void handleAuthStateChange(bool wasReady, bool isReady);

@@ -32,6 +32,22 @@ bool WiFiConnectionManager::begin() {
     // Disable debug output to prevent LED blinking issues
     wifiManager_.setDebugOutput(false);
 
+    // Custom captive portal styling — set once on this persistent WiFiManager
+    // instance, so it applies to both autoConnect() below and any later
+    // startConfigPortal() call.
+    wifiManager_.setCustomHeadElement(
+        "<style>"
+        "body{background:#1C1612;color:#F5F0E8;font-family:sans-serif;margin:0;padding:10px;}"
+        ".wrap{background:#2D2420;border-radius:12px;padding:20px;max-width:400px;margin:auto;}"
+        "h1,h2{color:#D4860A;}"
+        "input{background:#1C1612;color:#F5F0E8;border:1px solid #5C4A3A;border-radius:6px;padding:8px;width:100%;box-sizing:border-box;}"
+        "button,input[type=submit]{background:#D4860A;color:#1C1612;border:none;border-radius:8px;padding:10px;width:100%;font-weight:bold;cursor:pointer;}"
+        "button:hover,input[type=submit]:hover{background:#E8960B;}"
+        "a{color:#D4860A;}"
+        "div{box-sizing:border-box;}"
+        "</style>"
+    );
+
     // Generate unique AP name from MAC
     String apName = "BitBite-" + String((uint32_t)ESP.getEfuseMac(), HEX);
 

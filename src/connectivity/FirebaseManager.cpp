@@ -26,6 +26,52 @@ void FirebaseManager::setStreamInactiveCallback(StreamInactiveCallback callback)
 }
 
 // ============================================================================
+// ANONYMOUS AUTH TOKEN PERSISTENCE
+// ============================================================================
+// Avoids creating a brand new anonymous Firebase user on every boot/reconnect
+// by saving the refresh token to NVS and restoring from it via
+// Firebase.setIdToken() instead of calling Firebase.signUp() again.
+
+String FirebaseManager::loadSavedRefreshToken() {
+    tokenPrefs_.begin("firebase", true);  // Read-only
+    String token = tokenPrefs_.getString("refresh_token", "");
+    tokenPrefs_.end();
+    return token;
+}
+
+void FirebaseManager::saveRefreshToken(const String& token) {
+    if (token.length() == 0) {
+        return;  // Nothing meaningful to persist
+    }
+    tokenPrefs_.begin("firebase", false);  // Read-write
+    tokenPrefs_.putString("refresh_token", token);
+    tokenPrefs_.end();
+    LOG_DEBUG("Firebase refresh token saved to NVS");
+}
+
+void FirebaseManager::clearSavedRefreshToken() {
+    tokenPrefs_.begin("firebase", false);
+    tokenPrefs_.remove("refresh_token");
+    tokenPrefs_.end();
+}
+
+bool FirebaseManager::startAuth() {
+    String savedToken = loadSavedRefreshToken();
+
+    if (savedToken.length() > 0) {
+        LOG_INFO("Found saved refresh token - restoring session (skipping signUp)");
+        Firebase.setIdToken(&config_, "", 3600, savedToken.c_str());
+        Firebase.begin(&config_, &auth_);
+        return true;
+    }
+
+    LOG_INFO("No saved refresh token - creating new anonymous user");
+    Firebase.signUp(&config_, &auth_, "", "");
+    Firebase.begin(&config_, &auth_);
+    return false;
+}
+
+// ============================================================================
 // INITIALIZATION
 // ============================================================================
 
@@ -39,11 +85,9 @@ bool FirebaseManager::begin(const char* apiKey, const char* databaseUrl) {
     config_.timeout.serverResponse = 10000;
     config_.timeout.socketConnection = 10000;
 
-    // Anonymous sign-up (required by Firebase library for API key auth)
-    Firebase.signUp(&config_, &auth_, "", "");
-
-    // Begin Firebase
-    Firebase.begin(&config_, &auth_);
+    // Restore from a saved refresh token if we have one; otherwise a fresh
+    // anonymous signUp() (also calls Firebase.begin() internally).
+    bool usingSavedToken = startAuth();
 
     // Configure buffer sizes
     fbdo_.setResponseSize(FIREBASE_RESPONSE_SIZE);
@@ -67,7 +111,34 @@ bool FirebaseManager::begin(const char* apiKey, const char* databaseUrl) {
         LOG_INFO("Firebase connected and authenticated");
         initialized_ = true;
         authenticated_ = true;
+        saveRefreshToken(Firebase.getRefreshToken());
         return true;
+    }
+
+    // The saved token didn't work (revoked, expired beyond refresh, etc.) —
+    // fall back to a fresh anonymous sign-up rather than leaving the device
+    // permanently unable to authenticate.
+    if (usingSavedToken) {
+        LOG_WARN("Saved refresh token failed to authenticate - falling back to signUp()");
+        clearSavedRefreshToken();
+
+        Firebase.signUp(&config_, &auth_, "", "");
+        Firebase.begin(&config_, &auth_);
+
+        authStart = millis();
+        while (!Firebase.ready() && millis() - authStart < 15000) {
+            Serial.print(".");
+            delay(500);
+        }
+        Serial.println();
+
+        if (Firebase.ready()) {
+            LOG_INFO("Firebase connected and authenticated (fresh sign-up after saved-token failure)");
+            initialized_ = true;
+            authenticated_ = true;
+            saveRefreshToken(Firebase.getRefreshToken());
+            return true;
+        }
     }
 
     LOG_ERROR("Firebase authentication timeout");
@@ -97,10 +168,9 @@ bool FirebaseManager::reinitialize() {
     // Without this, a stale/expired token is silently reused.
     Firebase.reset(&config_);
 
-    // Step 4: Re-run anonymous sign-up, then begin.
-    // signUp must precede begin() — this is a library contract for anonymous auth.
-    Firebase.signUp(&config_, &auth_, "", "");
-    Firebase.begin(&config_, &auth_);
+    // Step 4: Restore from a saved refresh token if we have one; otherwise a
+    // fresh anonymous signUp(). Either way this also calls Firebase.begin().
+    bool usingSavedToken = startAuth();
 
     // Step 5: Restore buffer sizes (cleared when objects were cleared)
     fbdo_.setResponseSize(FIREBASE_RESPONSE_SIZE);
@@ -121,7 +191,31 @@ bool FirebaseManager::reinitialize() {
         LOG_INFO("Firebase reinitialized successfully");
         authenticated_ = true;
         reconnectFailures_ = 0;
+        saveRefreshToken(Firebase.getRefreshToken());
         return true;
+    }
+
+    // Step 7: Saved token didn't work — fall back to a fresh anonymous
+    // sign-up and retry once within the same reinitialize() call.
+    if (usingSavedToken) {
+        LOG_WARN("Saved refresh token failed to authenticate - falling back to signUp()");
+        clearSavedRefreshToken();
+
+        Firebase.signUp(&config_, &auth_, "", "");
+        Firebase.begin(&config_, &auth_);
+
+        start = millis();
+        while (!Firebase.ready() && millis() - start < 10000) {
+            delay(250);
+        }
+
+        if (Firebase.ready()) {
+            LOG_INFO("Firebase reinitialized successfully (fresh sign-up after saved-token failure)");
+            authenticated_ = true;
+            reconnectFailures_ = 0;
+            saveRefreshToken(Firebase.getRefreshToken());
+            return true;
+        }
     }
 
     reconnectFailures_++;
