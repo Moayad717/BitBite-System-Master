@@ -52,8 +52,6 @@ void CommandProcessor::processCommand(const String& commandType, const String& c
         handleSyncName();
     } else if (commandType == "CLEAR_FAULTS") {
         handleClearFaults();
-    } else if (commandType == "GET_SCHEDULE_STATUS") {
-        handleGetScheduleStatus();
     }
 #ifdef DEV_BUILD
     else if (commandType == "SIMULATE_FIREBASE_DOWN") {
@@ -95,11 +93,6 @@ void CommandProcessor::handleSyncName() {
 void CommandProcessor::handleClearFaults() {
     LOG_INFO("Command: Clear faults on Feeding ESP");
     enqueueSerial2Cmd("CLEAR_FAULTS");
-}
-
-void CommandProcessor::handleGetScheduleStatus() {
-    LOG_INFO("Command: Get schedule status from Feeding ESP");
-    enqueueSerial2Cmd("GET_SCHEDULE_STATUS");
 }
 
 void CommandProcessor::handleGenericCommand(const String& commandType) {

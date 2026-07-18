@@ -16,13 +16,14 @@ enum class QueueItemType : uint8_t {
     FAULT_SET,        // setJSON to {faultsPath}/{key} — active fault (fixed key, no duplicates)
     FAULT_DELETE,     // deleteNode {faultsPath}/{key} — fault resolved
     SYNC_STATUS,      // setJSON to {devicePath}/lastScheduleSync (Core 1 → Core 0)
-    SCHEDULE_STATUS,  // setJSON to {devicePath}/scheduleStatus   (Core 1 → Core 0)
     SCHEDULE_EXECUTED // setBool true at {devicePath}/schedules/{key}/executedToday
 };
 
 struct FirebaseQueueItem {
     QueueItemType type;
-    char jsonData[2048];    // Pre-formatted JSON string (2048 to fit schedule status payloads)
+    char jsonData[2048];    // Pre-formatted JSON string (generous headroom over the
+                             // largest current payload — relayed LOG entries, bounded
+                             // by SerialProtocol::MAX_LINE_LEN on the Feeding ESP side)
     char key[32];           // Fault key (e.g. "DHT_ERROR") — only used by FAULT_SET/FAULT_DELETE
 };
 

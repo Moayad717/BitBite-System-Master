@@ -1,5 +1,7 @@
 #include "LogManager.h"
 #include "DualCoreManager.h"
+#include <time.h>
+#include <sys/time.h>
 
 // ============================================================================
 // SINGLETON INSTANCE
@@ -217,10 +219,25 @@ void LogManager::logToSerial(const LogEntry& entry) {
     }
     filename = (filename != nullptr) ? filename + 1 : entry.file;
 
+    // Wall-clock time (matches the Feeding ESP's monitor timestamps) once NTP
+    // has synced; raw uptime before that, since there's no real time yet.
+    char timeStr[16];
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    struct tm timeinfo;
+    localtime_r(&tv.tv_sec, &timeinfo);
+
+    if (timeinfo.tm_year + 1900 >= 2024) {
+        snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d.%03ld",
+                 timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, tv.tv_usec / 1000);
+    } else {
+        snprintf(timeStr, sizeof(timeStr), "+%lums", entry.timestamp);
+    }
+
     // Format: [timestamp] [LEVEL] [file:line] message
-    Serial.printf("%s[%10lu] [%-5s] [%s:%d] %s\033[0m\n",
+    Serial.printf("%s[%s] [%-5s] [%s:%d] %s\033[0m\n",
                  levelToColorCode(entry.level),
-                 entry.timestamp,
+                 timeStr,
                  levelToString(entry.level),
                  filename,
                  entry.line,

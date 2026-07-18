@@ -26,7 +26,14 @@
 
 // Schedule Sync
 #define SCHEDULE_SYNC_TIMEOUT 5000          // 5 seconds timeout for confirmation
-#define SCHEDULE_STATUS_TIMEOUT 10000       // 10 seconds timeout for multi-line status collection
+
+// Time Sync (TIME: is a tiny, one-shot payload sent right after boot — the
+// most common single point of loss/corruption on the Serial2 link we've
+// seen, since the Feeding ESP is listening continuously through the WiFi
+// ESP's own reset. Retried automatically since there's no app/user action
+// that can trigger a resend.)
+#define TIME_SYNC_TIMEOUT 3000              // 3 seconds timeout for TIME_ACK confirmation
+#define TIME_SYNC_MAX_RETRIES 5             // Give up after this many unacknowledged attempts
 
 // Feeder OTA forwarding
 #define FEEDER_OTA_RETRY_MS  30000          // Minimum gap between Serial2 transfer attempts

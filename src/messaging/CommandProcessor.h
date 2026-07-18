@@ -42,7 +42,6 @@ private:
     void handleSyncSchedules();
     void handleSyncName();
     void handleClearFaults();
-    void handleGetScheduleStatus();
     void handleGenericCommand(const String& commandType);
 #ifdef DEV_BUILD
     void handleSimulateFirebaseDown();

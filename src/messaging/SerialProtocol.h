@@ -17,7 +17,7 @@ class OfflineQueueManager;
 //     - TIME:YYYY-MM-DD HH:MM:SS
 //     - NAME:Display Name
 //     - SCHEDULES:{json}
-//     - FEED_NOW, TARE, CLEAR_FAULTS, GET_SCHEDULE_STATUS (commands)
+//     - FEED_NOW, TARE, CLEAR_FAULTS (commands)
 //
 //   RX (Feeding → WiFi):
 //     - {json} (status update)
@@ -25,7 +25,8 @@ class OfflineQueueManager;
 //     - FAULT_SET:<key>:{json} (fault active — set()'d to devices/{id}/faults/{key})
 //     - FAULT_CLEAR:<key> (fault resolved — deleted from devices/{id}/faults/{key})
 //     - SCHEDULE_HASH:12345 (schedule sync confirmation)
-//     - SCHEDULE_STATUS:... / SCHEDULE_ITEM:... / SCHEDULE_STATUS:END (multi-line)
+//     - TIME_ACK (time sync confirmation — TIME: is retried automatically
+//       on timeout, up to TIME_SYNC_MAX_RETRIES, if this isn't seen)
 //     - SCHEDULE_EXECUTED:<scheduleId> (a scheduled feed ran — sets
 //       devices/{id}/schedules/{scheduleId}/executedToday = true)
 
@@ -64,14 +65,13 @@ private:
         unsigned long syncTime;
     } scheduleSyncState_;
 
-    // Schedule status collection state
-    struct ScheduleStatusState {
-        bool collecting;
-        String headerJson;          // Parsed header info (date, time, day, count)
-        String itemsJson;           // Accumulated schedule items as JSON array
-        int itemCount;
-        unsigned long startTime;
-    } scheduleStatusState_;
+    // Time sync state — TIME: gets no reply loop-back other than TIME_ACK,
+    // so unlike schedules there's no content to re-verify, just delivery.
+    struct TimeSyncState {
+        bool waitingForConfirmation;
+        unsigned long syncTime;
+        uint8_t retryCount;
+    } timeSyncState_;
 
     // Incoming line buffer — fixed size, non-blocking (replaces the old
     // Serial2.readStringUntil() which had no length bound and blocked the
@@ -92,10 +92,7 @@ private:
     void handleFaultSet(const String& payload);
     void handleFaultClear(const String& key);
     void handleScheduleHash(const String& hash);
-    void handleScheduleStatusHeader(const String& header);
-    void handleScheduleItem(const String& item);
-    void handleScheduleStatusEnd();
-    void sendScheduleStatusToFirebase();
+    void handleTimeAck();
     void handleScheduleExecuted(const String& scheduleId);
 
     // Helpers

@@ -53,7 +53,6 @@ static const char* queueItemTypeName(QueueItemType type) {
         case QueueItemType::FAULT_SET:       return "FAULT_SET";
         case QueueItemType::FAULT_DELETE:    return "FAULT_DELETE";
         case QueueItemType::SYNC_STATUS:     return "SYNC_STATUS";
-        case QueueItemType::SCHEDULE_STATUS: return "SCHEDULE_STATUS";
         case QueueItemType::SCHEDULE_EXECUTED: return "SCHEDULE_EXECUTED";
         default:                             return "UNKNOWN";
     }
@@ -131,13 +130,6 @@ static void processFirebaseQueue() {
                 success = firebaseManager.setJSON(path, &json);
                 if (success) {
                     LOG_DEBUG("Queue: Schedule sync status sent to Firebase");
-                }
-            } else if (item.type == QueueItemType::SCHEDULE_STATUS) {
-                char path[128];
-                snprintf(path, sizeof(path), "%s/scheduleStatus", deviceManager.getDevicePath());
-                success = firebaseManager.setJSON(path, &json);
-                if (success) {
-                    LOG_INFO("Queue: Schedule status sent to Firebase");
                 }
             } else if (item.type == QueueItemType::LOG) {
                 char path[128];

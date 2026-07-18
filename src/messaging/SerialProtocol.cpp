@@ -25,9 +25,9 @@ SerialProtocol::SerialProtocol()
     scheduleSyncState_.expectedHash = "";
     scheduleSyncState_.syncTime = 0;
 
-    scheduleStatusState_.collecting = false;
-    scheduleStatusState_.itemCount = 0;
-    scheduleStatusState_.startTime = 0;
+    timeSyncState_.waitingForConfirmation = false;
+    timeSyncState_.syncTime = 0;
+    timeSyncState_.retryCount = 0;
 
     lineBuf_[0] = '\0';
 }
@@ -78,6 +78,9 @@ void SerialProtocol::sendTime() {
 
     Serial2.printf("TIME:%s\n", timestamp);
     LOG_INFO("Time sent to Feeding ESP: %s", timestamp);
+
+    timeSyncState_.waitingForConfirmation = true;
+    timeSyncState_.syncTime = millis();
 }
 
 void SerialProtocol::sendDisplayName() {
@@ -155,11 +158,21 @@ void SerialProtocol::handleIncomingData() {
         scheduleSyncState_.waitingForConfirmation = false;
     }
 
-    // Check for schedule status collection timeout
-    if (scheduleStatusState_.collecting &&
-        (millis() - scheduleStatusState_.startTime >= SCHEDULE_STATUS_TIMEOUT)) {
-        LOG_WARN("Schedule status collection timed out");
-        scheduleStatusState_.collecting = false;
+    // Check for time sync timeout — retry automatically since there's no
+    // app/user action that can trigger a resend of TIME:.
+    if (timeSyncState_.waitingForConfirmation &&
+        (millis() - timeSyncState_.syncTime >= TIME_SYNC_TIMEOUT)) {
+        timeSyncState_.waitingForConfirmation = false;
+
+        if (timeSyncState_.retryCount < TIME_SYNC_MAX_RETRIES) {
+            timeSyncState_.retryCount++;
+            LOG_WARN("Time sync confirmation timed out - retrying (%u/%u)",
+                     timeSyncState_.retryCount, TIME_SYNC_MAX_RETRIES);
+            sendTime();
+        } else {
+            LOG_ERROR("Time sync failed after %u attempts - Feeding ESP RTC may be unsynced",
+                       TIME_SYNC_MAX_RETRIES);
+        }
     }
 
     while (Serial2.available()) {
@@ -211,12 +224,8 @@ void SerialProtocol::processMessage(const String& message) {
         handleFaultClear(message.substring(12));
     } else if (message.startsWith("SCHEDULE_HASH:")) {
         handleScheduleHash(message.substring(14));
-    } else if (message.startsWith("SCHEDULE_STATUS:END")) {
-        handleScheduleStatusEnd();
-    } else if (message.startsWith("SCHEDULE_STATUS:")) {
-        handleScheduleStatusHeader(message.substring(16));
-    } else if (message.startsWith("SCHEDULE_ITEM:")) {
-        handleScheduleItem(message.substring(14));
+    } else if (message.startsWith("TIME_ACK")) {
+        handleTimeAck();
     } else if (message.startsWith("SCHEDULE_EXECUTED:")) {
         handleScheduleExecuted(message.substring(18));
     } else if (message.startsWith("{") && message.endsWith("}")) {
@@ -328,6 +337,14 @@ void SerialProtocol::handleScheduleHash(const String& hash) {
     }
 }
 
+void SerialProtocol::handleTimeAck() {
+    if (timeSyncState_.waitingForConfirmation) {
+        LOG_INFO("Time sync verified by Feeding ESP (%u retries)", timeSyncState_.retryCount);
+        timeSyncState_.waitingForConfirmation = false;
+        timeSyncState_.retryCount = 0;
+    }
+}
+
 void SerialProtocol::handleScheduleExecuted(const String& scheduleId) {
     String trimmedId = scheduleId;
     trimmedId.trim();
@@ -340,156 +357,6 @@ void SerialProtocol::handleScheduleExecuted(const String& scheduleId) {
 
     if (!enqueueFirebaseWrite(QueueItemType::SCHEDULE_EXECUTED, "", trimmedId.c_str())) {
         LOG_WARN("Failed to queue schedule executed update");
-    }
-}
-
-// ============================================================================
-// SCHEDULE STATUS HANDLING
-// ============================================================================
-
-void SerialProtocol::handleScheduleStatusHeader(const String& header) {
-    // Parse: Date=20260215,Time=14:30,Day=5,Count=16
-    LOG_INFO("Schedule status header received");
-
-    scheduleStatusState_.collecting = true;
-    scheduleStatusState_.startTime = millis();
-    scheduleStatusState_.itemCount = 0;
-    scheduleStatusState_.itemsJson = "[";
-
-    // Parse header key=value pairs into JSON
-    scheduleStatusState_.headerJson = "{";
-    int start = 0;
-    bool first = true;
-    while (start < (int)header.length()) {
-        int comma = header.indexOf(',', start);
-        if (comma == -1) comma = header.length();
-
-        String pair = header.substring(start, comma);
-        int eq = pair.indexOf('=');
-        if (eq > 0) {
-            String key = pair.substring(0, eq);
-            String value = pair.substring(eq + 1);
-            key.trim();
-            value.trim();
-
-            if (!first) scheduleStatusState_.headerJson += ",";
-            // Keep numeric values unquoted
-            if (key == "Count" || key == "Day") {
-                scheduleStatusState_.headerJson += "\"";
-                scheduleStatusState_.headerJson += key;
-                scheduleStatusState_.headerJson += "\":";
-                scheduleStatusState_.headerJson += value;
-            } else {
-                scheduleStatusState_.headerJson += "\"";
-                scheduleStatusState_.headerJson += key;
-                scheduleStatusState_.headerJson += "\":\"";
-                scheduleStatusState_.headerJson += value;
-                scheduleStatusState_.headerJson += "\"";
-            }
-            first = false;
-        }
-        start = comma + 1;
-    }
-    scheduleStatusState_.headerJson += "}";
-}
-
-void SerialProtocol::handleScheduleItem(const String& item) {
-    // Parse: 0,Time=06:00,Days=0x7F,Amount=0.150,Enabled=1,AppliesNow=1,ExecutedToday=1,LastExec=20260215
-    if (!scheduleStatusState_.collecting) {
-        LOG_WARN("Received SCHEDULE_ITEM without active collection");
-        return;
-    }
-
-    if (scheduleStatusState_.itemCount > 0) {
-        scheduleStatusState_.itemsJson += ",";
-    }
-
-    // First field is the index
-    int firstComma = item.indexOf(',');
-    String index = (firstComma > 0) ? item.substring(0, firstComma) : "0";
-    String fields = (firstComma > 0) ? item.substring(firstComma + 1) : "";
-
-    scheduleStatusState_.itemsJson += "{\"index\":";
-    scheduleStatusState_.itemsJson += index;
-
-    // Parse remaining key=value pairs
-    int start = 0;
-    while (start < (int)fields.length()) {
-        int comma = fields.indexOf(',', start);
-        if (comma == -1) comma = fields.length();
-
-        String pair = fields.substring(start, comma);
-        int eq = pair.indexOf('=');
-        if (eq > 0) {
-            String key = pair.substring(0, eq);
-            String value = pair.substring(eq + 1);
-            key.trim();
-            value.trim();
-
-            // Numeric fields: Enabled, AppliesNow, ExecutedToday, Amount, Days (hex)
-            if (key == "Enabled" || key == "AppliesNow" || key == "ExecutedToday") {
-                scheduleStatusState_.itemsJson += ",\"";
-                scheduleStatusState_.itemsJson += key;
-                scheduleStatusState_.itemsJson += "\":";
-                scheduleStatusState_.itemsJson += (value == "1" ? "true" : "false");
-            } else if (key == "Amount") {
-                scheduleStatusState_.itemsJson += ",\"";
-                scheduleStatusState_.itemsJson += key;
-                scheduleStatusState_.itemsJson += "\":";
-                scheduleStatusState_.itemsJson += value;
-            } else {
-                scheduleStatusState_.itemsJson += ",\"";
-                scheduleStatusState_.itemsJson += key;
-                scheduleStatusState_.itemsJson += "\":\"";
-                scheduleStatusState_.itemsJson += value;
-                scheduleStatusState_.itemsJson += "\"";
-            }
-        }
-        start = comma + 1;
-    }
-
-    scheduleStatusState_.itemsJson += "}";
-    scheduleStatusState_.itemCount++;
-}
-
-void SerialProtocol::handleScheduleStatusEnd() {
-    if (!scheduleStatusState_.collecting) {
-        LOG_WARN("Received SCHEDULE_STATUS:END without active collection");
-        return;
-    }
-
-    scheduleStatusState_.collecting = false;
-    scheduleStatusState_.itemsJson += "]";
-
-    LOG_INFO("Schedule status complete: %d items", scheduleStatusState_.itemCount);
-    sendScheduleStatusToFirebase();
-}
-
-void SerialProtocol::sendScheduleStatusToFirebase() {
-    // Build combined JSON: { header info + "items": [...] }
-    FirebaseJson json;
-    json.setJsonData(scheduleStatusState_.headerJson);
-
-    FirebaseJson itemsArray;
-    itemsArray.setJsonData(scheduleStatusState_.itemsJson);
-    json.set("items", itemsArray);
-
-    char timestamp[25];
-    deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
-    json.set("timestamp", timestamp);
-
-    String jsonStr;
-    json.toString(jsonStr);
-    json.clear();
-    itemsArray.clear();
-
-    // Free accumulated strings before enqueueing
-    scheduleStatusState_.headerJson = "";
-    scheduleStatusState_.itemsJson = "";
-
-    // Route through Core 0 queue — never call Firebase directly from Core 1
-    if (!enqueueFirebaseWrite(QueueItemType::SCHEDULE_STATUS, jsonStr.c_str())) {
-        LOG_WARN("Failed to queue schedule status");
     }
 }
 
