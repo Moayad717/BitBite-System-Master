@@ -59,7 +59,7 @@ void sendStatusToFirebase() {
     }
 
     char timestamp[25];
-    deviceManager.getTimestamp(timestamp, sizeof(timestamp));
+    deviceManager.getUTCTimestamp(timestamp, sizeof(timestamp));
 
     // Note: SerialProtocol automatically sends full status updates (including sensor data)
     // when it receives data from Feeding ESP. This function only sends connectivity heartbeat

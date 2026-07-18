@@ -248,7 +248,7 @@ void SerialProtocol::handleStatusUpdate(const String& statusJson) {
     }
 
     char timestamp[25];
-    deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
+    deviceManager_->getUTCTimestamp(timestamp, sizeof(timestamp));
     json.set("isOnline", true);
     json.set("wifiSignal", WiFi.RSSI());
     json.set("lastSeen", timestamp);

@@ -30,6 +30,13 @@ public:
 
     // Timestamp utilities
     void getTimestamp(char* buffer, size_t bufferSize);
+
+    // UTC timestamp (ISO 8601 with "Z" suffix) - used only for the "lastSeen"
+    // status field. getTimestamp() above is local time and is shared by
+    // other timestamp fields (createdAt, schedule sync/status) that must
+    // stay as-is, so this is a separate method rather than changing it.
+    void getUTCTimestamp(char* buffer, size_t bufferSize);
+
     bool hasValidTime() const;
 
     // Boot reset reason (captured once in begin(), read-only afterward)

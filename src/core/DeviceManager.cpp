@@ -137,6 +137,25 @@ void DeviceManager::getTimestamp(char* buffer, size_t bufferSize) {
     snprintf(buffer, bufferSize, "uptime_%lu", millis());
 }
 
+void DeviceManager::getUTCTimestamp(char* buffer, size_t bufferSize) {
+    struct tm localCheck;
+
+    // getLocalTime() also confirms whether time has synced at all - reused
+    // here purely as that check, the actual formatting below uses gmtime_r()
+    // so the output is UTC regardless of the device's configured timezone.
+    if (getLocalTime(&localCheck)) {
+        time_t now;
+        time(&now);
+        struct tm utcTime;
+        gmtime_r(&now, &utcTime);
+        strftime(buffer, bufferSize, "%Y-%m-%dT%H:%M:%SZ", &utcTime);
+        return;
+    }
+
+    // Fallback to millis if time not synced
+    snprintf(buffer, bufferSize, "uptime_%lu", millis());
+}
+
 bool DeviceManager::hasValidTime() const {
     struct tm timeinfo;
     return getLocalTime(&timeinfo);

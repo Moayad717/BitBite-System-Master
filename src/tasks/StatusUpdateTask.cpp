@@ -31,7 +31,7 @@ void StatusUpdateTask::execute() {
     }
 
     char timestamp[25];
-    deviceManager_->getTimestamp(timestamp, sizeof(timestamp));
+    deviceManager_->getUTCTimestamp(timestamp, sizeof(timestamp));
 
     FirebaseJson json;
     json.set("isOnline", true);
